@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EscriTab — Suno / Áudio para Tablatura de Guitarra</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/@coderline/alphatab@latest/dist/alphaTab.min.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-badge">ESCRITAB</span>
+      <h1>Estúdio IA: Suno / Áudio &rarr; Stems &rarr; MIDI &rarr; Tablatura</h1>
+    </div>
+    <div class="job-selector">
+      <label for="recentJobsSelect">Sessões Salvas:</label>
+      <select id="recentJobsSelect">
+        <option value="">-- Nova Sessão --</option>
+      </select>
+    </div>
+  </header>
+
+  <main class="workspace-grid">
+    <!-- ETAPA 1: UPLOAD -->
+    <section class="card" id="step1Card">
+      <div class="card-header">
+        <span class="step-num">1</span>
+        <h2>Upload do Áudio ou Stem</h2>
+      </div>
+      <form id="uploadForm" class="controls-stack">
+        <div class="file-drop" id="fileDropZone">
+          <input type="file" id="audioFileInput" accept=".mp3,.wav,.flac,.ogg,.m4a" required />
+          <p id="fileNameDisplay">Arraste um MP3/WAV/FLAC do Suno ou clique para selecionar</p>
+        </div>
+        <label class="checkbox-row">
+          <input type="checkbox" id="isolatedStemCheck" />
+          <span>Este arquivo já é uma pista de guitarra isolada (pular Demucs)</span>
+        </label>
+        <div class="row-inline">
+          <label for="demucsModelSelect">Modelo Demucs:</label>
+          <select id="demucsModelSelect">
+            <option value="htdemucs_6s" selected>htdemucs_6s (6 Stems - Isola Guitarra)</option>
+            <option value="htdemucs">htdemucs (4 Stems)</option>
+          </select>
+          <button type="submit" class="btn-primary" id="uploadBtn">Enviar e Preparar</button>
+        </div>
+      </form>
+      <div id="step1Status" class="status-banner hidden"></div>
+    </section>
+
+    <!-- ETAPA 2: STEMS -->
+    <section class="card" id="step2Card">
+      <div class="card-header">
+        <span class="step-num">2</span>
+        <h2>Audição e Seleção de Stems</h2>
+      </div>
+      <div class="controls-stack">
+        <div id="stemsContainer" class="stems-list">
+          <p class="muted">Faça o upload na Etapa 1 para ouvir as pistas separadas.</p>
+        </div>
+        <div class="row-inline">
+          <label for="selectedStemSelect">Pista para Transcrever:</label>
+          <select id="selectedStemSelect">
+            <option value="guitar">Guitar (Guitarra Isolada)</option>
+            <option value="guitar+other">Guitar + Other (Mixar Base + Solo/Synth)</option>
+            <option value="other">Other</option>
+            <option value="bass">Bass (Baixo)</option>
+          </select>
+        </div>
+      </div>
+    </section>
+
+    <!-- ETAPA 3: TRANSCRIÇÃO MIDI E LIMPEZA HARMÔNICA -->
+    <section class="card" id="step3Card">
+      <div class="card-header">
+        <span class="step-num">3</span>
+        <h2>Transcrição MIDI &amp; Limpeza Metal</h2>
+      </div>
+      <div class="controls-grid">
+        <div class="control-group">
+          <label for="onsetSlider">Onset Threshold (Ataque): <strong id="onsetVal">0.50</strong></label>
+          <input type="range" id="onsetSlider" min="0.20" max="0.85" step="0.05" value="0.50" />
+          <small>Aumente se a distorção gerar notas fantasmas demais.</small>
+        </div>
+        <div class="control-group">
+          <label for="frameSlider">Frame Threshold (Sustentação): <strong id="frameVal">0.30</strong></label>
+          <input type="range" id="frameSlider" min="0.15" max="0.70" step="0.05" value="0.30" />
+        </div>
+        <div class="control-group">
+          <label for="minLenSlider">Duração Mínima (ms): <strong id="minLenVal">60</strong> ms</label>
+          <input type="range" id="minLenSlider" min="20" max="200" step="10" value="60" />
+        </div>
+        <div class="control-group">
+          <label for="gateSlider">Noise Gate (dB): <strong id="gateVal">-45</strong> dB</label>
+          <input type="range" id="gateSlider" min="-70" max="-20" step="5" value="-45" />
+        </div>
+        <div class="control-group">
+          <label for="quantizeSelect">Quantização Rítmica:</label>
+          <select id="quantizeSelect">
+            <option value="off">Desativada (Tempo Natural)</option>
+            <option value="1/16">1/16 (Semicolcheia)</option>
+            <option value="1/32">1/32 (Fusa)</option>
+          </select>
+        </div>
+        <div class="control-group checkboxes">
+          <label class="checkbox-row">
+            <input type="checkbox" id="bandpassCheck" checked />
+            <span>Filtro Passa-Faixa Guitarra (75 Hz – 5.5 kHz)</span>
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" id="suppressHarmonicsCheck" checked />
+            <span>Suprimir Harmônicos de Distorção (Oitavas/Quintas Espúrias)</span>
+          </label>
+        </div>
+      </div>
+      <div class="row-inline top-gap">
+        <button type="button" class="btn-primary" id="transcribeBtn" disabled>Gerar MIDI Limpo</button>
+        <span id="midiStatsBadge" class="badge hidden"></span>
+      </div>
+    </section>
+
+    <!-- ETAPA 4: AFINAÇÃO E OTIMIZAÇÃO DE BRAÇO (VITERBI) -->
+    <section class="card" id="step4Card">
+      <div class="card-header">
+        <span class="step-num">4</span>
+        <h2>Afinação &amp; Otimizador de Braço (Viterbi)</h2>
+      </div>
+      <div class="controls-grid">
+        <div class="control-group">
+          <label for="tuningSelect">Afinação da Guitarra:</label>
+          <select id="tuningSelect"></select>
+        </div>
+        <div class="control-group">
+          <label for="fretPrefSelect">Região Preferencial do Braço:</label>
+          <select id="fretPrefSelect">
+            <option value="auto">Automática (Equilibrada)</option>
+            <option value="low">Primeiras Casas / Riffs Graves (0 – 7)</option>
+            <option value="mid">Região Média (3 – 12)</option>
+            <option value="high">Região Aguda / Solos (7 – 19)</option>
+          </select>
+        </div>
+        <div class="control-group">
+          <label for="bpmInput">Andamento (BPM):</label>
+          <input type="number" id="bpmInput" min="40" max="280" step="0.5" value="120" />
+        </div>
+        <div class="control-group">
+          <label for="maxFretsInput">Número de Casas:</label>
+          <input type="number" id="maxFretsInput" min="18" max="27" value="24" />
+        </div>
+      </div>
+      <div class="row-inline top-gap">
+        <button type="button" class="btn-accent" id="generateTabBtn" disabled>Otimizar Digitação e Gerar Tablatura</button>
+        <div id="exportLinks" class="export-group hidden">
+          <a id="dlGp5" class="btn-outline" download>Baixar .GP5 (Guitar Pro)</a>
+          <a id="dlXml" class="btn-outline" download>Baixar .MusicXML</a>
+          <a id="dlMid" class="btn-outline" download>Baixar .MID</a>
+          <a id="dlTxt" class="btn-outline" download>Baixar .TXT (ASCII)</a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- PLAYER INTERATIVO ALPHATAB + ASCII PREVIEW -->
+  <section class="card player-section" id="playerSection">
+    <div class="player-toolbar">
+      <h2>Visualizador Interativo de Tablatura (AlphaTab)</h2>
+      <div class="player-controls">
+        <button type="button" id="playPauseBtn" class="btn-primary" disabled>&#9654; Play / Pause</button>
+        <button type="button" id="stopBtn" class="btn-outline" disabled>&#9632; Stop</button>
+        <label class="checkbox-row inline-ctrl">
+          <input type="checkbox" id="loopCheck" />
+          <span>Loop</span>
+        </label>
+        <label class="checkbox-row inline-ctrl">
+          <input type="checkbox" id="metronomeCheck" />
+          <span>Metrônomo</span>
+        </label>
+        <label class="inline-ctrl">
+          Velocidade:
+          <select id="speedSelect">
+            <option value="0.25">0.25x</option>
+            <option value="0.5">0.50x</option>
+            <option value="0.75">0.75x</option>
+            <option value="1" selected>1.00x</option>
+            <option value="1.25">1.25x</option>
+          </select>
+        </label>
+      </div>
+    </div>
+
+    <div id="alphaTabViewport" class="alphatab-viewport">
+      <div id="alphaTabContainer"></div>
+    </div>
+
+    <details class="ascii-drawer">
+      <summary>Ver Tablatura em Texto (ASCII Tab)</summary>
+      <pre id="asciiPreviewBox">Gere uma tablatura na Etapa 4 para visualizar aqui.</pre>
+    </details>
+  </section>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

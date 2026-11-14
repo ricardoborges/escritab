@@ -102,3 +102,20 @@ def test_transcribe_returns_422_on_silent_audio(tmp_path: Path):
     )
     assert res_trans.status_code == 422
     assert "Nenhuma nota" in res_trans.json()["detail"]
+
+
+def test_root_serves_web_ui_and_assets(tmp_path: Path):
+    app = create_app(workspace_root=tmp_path)
+    client = TestClient(app)
+
+    res_html = client.get("/")
+    assert res_html.status_code == 200
+    assert "AlphaTab" in res_html.text or "alphaTab" in res_html.text
+    assert "EscriTab" in res_html.text
+
+    res_css = client.get("/static/styles.css")
+    assert res_css.status_code == 200
+
+    res_js = client.get("/static/app.js")
+    assert res_js.status_code == 200
+
