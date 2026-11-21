@@ -11,6 +11,8 @@ pyguitarpro>=0.9.3
 demucs>=4.0.1
 # Multi-instrument transcription (Apache-2.0; pinned commit, no PyPI release yet)
 dettato @ git+https://github.com/kobimusic/dettato@9b724251794f2bbd5eaa43e54734e5a251829130
+# Lyrics alignment (word timestamps on the vocals stem)
+openai-whisper>=20250625
 # Legacy / fallback single-stem transcriber
 basic-pitch>=0.3.0
 onnxruntime-gpu>=1.18.0

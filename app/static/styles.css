@@ -921,6 +921,193 @@ details.card:not([open]) {
   cursor: default;
 }
 
+/* ---------- lyrics + chord sheet ---------- */
+.lyrics-editor,
+.lyrics-view {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+.lyrics-editor.hidden,
+.lyrics-view.hidden {
+  display: none;
+}
+.lyrics-editor textarea {
+  width: 100%;
+  min-height: 14rem;
+  resize: vertical;
+  padding: 0.7rem 0.85rem;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 0.9rem;
+  line-height: 1.45;
+  color: var(--text-main);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.lyrics-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.9rem;
+}
+.sheet {
+  position: relative;
+  max-height: 62vh;
+  overflow: auto;
+  padding: 0.6rem 0.75rem 1.5rem;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 1rem;
+  line-height: 1.35;
+}
+.sheet-section {
+  margin: 1rem 0 0.3rem;
+  padding-bottom: 0.15rem;
+  font-family: inherit;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+}
+.sheet-section:first-child {
+  margin-top: 0.2rem;
+}
+.sheet-row {
+  padding: 0.12rem 0.45rem;
+  border-left: 3px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: pre;
+}
+.sheet-row:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+.sheet-row.current {
+  background: rgba(59, 130, 246, 0.13);
+  border-left-color: var(--primary);
+}
+.sheet-row.para {
+  margin-top: 0.6rem;
+}
+.sheet-chords {
+  position: relative;
+  height: 1.3em;
+}
+.sheet-chords.empty {
+  height: 0.35em;
+}
+.sheet-chord {
+  position: absolute;
+  top: 0;
+  padding: 0;
+  font: inherit;
+  font-weight: 700;
+  color: var(--fn-color);
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+.sheet-chord:hover {
+  text-decoration: underline;
+}
+.sheet-text {
+  color: var(--text-main);
+}
+.sheet-word.guess,
+.guess-sample {
+  text-decoration: underline dotted var(--text-muted);
+  text-underline-offset: 3px;
+}
+.sheet-row.current .sheet-word.sung {
+  color: var(--accent);
+}
+.sheet-instr {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.6rem;
+  margin: 0.35rem 0;
+  white-space: normal;
+}
+.instr-mark {
+  color: var(--text-muted);
+}
+.instr-chord {
+  padding: 0.05rem 0.45rem;
+  font: inherit;
+  font-weight: 700;
+  font-size: 0.92rem;
+  color: var(--text-main);
+  background: color-mix(in srgb, var(--fn-color) 16%, transparent);
+  border: 0;
+  border-left: 2px solid var(--fn-color);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+/* ---------- selected section / loop ---------- */
+.selection-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.9rem;
+  padding: 0.5rem 0.8rem;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  font-size: 0.88rem;
+}
+.selection-bar.has-selection {
+  border-style: solid;
+  border-color: color-mix(in srgb, var(--primary) 55%, var(--border));
+  background: rgba(59, 130, 246, 0.07);
+}
+.sel-dot {
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 50%;
+  flex: none;
+  background: transparent;
+  border: 1px solid var(--text-muted);
+}
+.has-selection .sel-dot {
+  border: 0;
+}
+.sel-label {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+.loop-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.25rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+  font-weight: 600;
+  user-select: none;
+}
+.loop-toggle input {
+  accent-color: var(--accent);
+}
+.loop-toggle.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgba(245, 158, 11, 0.1);
+}
+.loop-toggle.is-disabled {
+  cursor: not-allowed;
+}
+.part-row.selected {
+  border-color: var(--primary);
+  background: rgba(59, 130, 246, 0.08);
+}
+
 /* ---------- harmony ---------- */
 :root {
   --fn-T: #10b981;

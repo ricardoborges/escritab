@@ -19,7 +19,7 @@ import numpy as np
 import soundfile as sf
 
 from app.models import JobMetadata, NoteEvent, Part, TabParams, TranscriptionParams
-from app.pipeline import dettato_transcriber, harmony
+from app.pipeline import dettato_transcriber, harmony, lyrics
 from app.pipeline.audio_cleaner import apply_bandpass_filter, apply_noise_gate, mix_stem_files
 from app.pipeline.exporters import export_ascii_tab, export_gp5, export_musicxml
 from app.pipeline.fretboard import optimize_fretboard
@@ -119,6 +119,78 @@ def compute_harmony(job: JobMetadata, job_dir: Path) -> dict:
 def load_harmony(job_dir: Path) -> dict | None:
     path = job_dir / HARMONY_FILE
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+
+
+# ---------- lyrics ----------
+
+LYRICS_FILE = "lyrics.json"
+PROMPT_CHARS = 600  # Whisper reads at most ~224 tokens of prompt
+
+
+def _vocals_audio(job: JobMetadata, job_dir: Path) -> tuple[np.ndarray, str]:
+    """The vocals stem (much better for Whisper) or, without stems, the whole mix."""
+    if "vocals" in job.stems:
+        path, source = job_dir / job.stems["vocals"], "stem de vocais"
+    elif job.is_isolated_stem and job.stems:
+        path, source = job_dir / next(iter(job.stems.values())), "pista enviada"
+    else:
+        path, source = job_dir / job.input_path, "mix completo (sem stem de vocais)"
+    y, _ = librosa.load(str(path), sr=lyrics.WHISPER_SR, mono=True)
+    return y, source
+
+
+def align_project_lyrics(
+    job: JobMetadata, job_dir: Path, text: str, language: str | None, model: str
+) -> dict:
+    """Whisper on the vocals, then align the pasted lyrics to what it heard (or keep Whisper's
+    own text as a draft when nothing was pasted). Saved in lyrics.json."""
+    audio, source = _vocals_audio(job, job_dir)
+    prompt = " ".join(text.split())[:PROMPT_CHARS] if text.strip() else None
+    heard, info = lyrics.transcribe_words(audio, model_name=model, language=language, prompt=prompt)
+    if not heard:
+        raise PartError("O Whisper não ouviu nenhuma palavra cantada nesta música.", status=422)
+    try:
+        if text.strip():
+            lines, mode = lyrics.align_lyrics(text, heard), "aligned"
+        else:
+            lines, mode = lyrics.lines_from_whisper(info, heard), "whisper"
+    except lyrics.LyricsError as exc:
+        raise PartError(str(exc), status=422) from exc
+    if not lines:
+        raise PartError("Nenhuma linha cantada encontrada.", status=422)
+    n_words = sum(len(l["words"]) for l in lines)
+    data = {
+        "version": 1,
+        "mode": mode,
+        "text": text if text.strip() else lyrics.lines_to_text(lines),
+        "language": info["language"],
+        "model": info["model"],
+        "device": info["device"],
+        "source": source,
+        "created_at": now_iso(),
+        "lines": lines,
+        "stats": {
+            "lines": len(lines),
+            "words": n_words,
+            "heard_words": len(heard),
+            "matched_share": round(sum(w["matched"] for l in lines for w in l["words"]) / max(1, n_words), 3),
+        },
+    }
+    (job_dir / LYRICS_FILE).write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    return data
+
+
+def lyrics_payload(job: JobMetadata, job_dir: Path) -> dict:
+    """Saved lyrics plus the chord sheet built from the current harmony analysis (when there is one)."""
+    path = job_dir / LYRICS_FILE
+    data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+    harm = load_harmony(job_dir)
+    sheet = None
+    if data:
+        chords = harm["chords"] if harm else []
+        field = harm["field"] if harm else []
+        sheet = lyrics.chord_sheet(data["lines"], chords, field, job.duration or data["lines"][-1]["end"])
+    return {"lyrics": data, "sheet": sheet, "has_harmony": harm is not None}
 
 
 def ensure_project(job: JobMetadata, job_dir: Path) -> bool:

@@ -95,7 +95,7 @@
       <div class="card">
         <div class="card-head">
           <h3>Marque as partes</h3>
-          <span class="muted">Arraste sobre a onda para selecionar um trecho. Clique numa parte para ouvi-la em loop; dois cliques abrem a parte.</span>
+          <span class="muted">Arraste sobre a onda para marcar um trecho novo. Um clique numa parte a seleciona, dois cliques a abrem.</span>
         </div>
         <div id="projWave" class="wave"></div>
         <div id="chordLane" class="chord-lane hidden" aria-label="Acordes detectados">
@@ -125,6 +125,14 @@
         <div id="liveHint" class="live-hint hidden">
           <span class="muted">Para ver os acordes ao vivo enquanto a música toca, analise a harmonia.</span>
           <button type="button" class="btn-outline btn-small" id="liveAnalyzeBtn">Analisar harmonia</button>
+        </div>
+        <div id="selectionBar" class="selection-bar">
+          <span id="selDot" class="sel-dot"></span>
+          <span id="selLabel" class="sel-label"></span>
+          <label id="loopToggle" class="loop-toggle" title="Toca o trecho selecionado em loop, sem parar">
+            <input type="checkbox" id="loopCheck" /><span>&#10227; Repetir trecho</span>
+          </label>
+          <button type="button" class="btn-outline btn-small hidden" id="selClearBtn" title="Tirar a seleção e voltar a tocar a música inteira">&#10005; Limpar seleção</button>
         </div>
         <div class="wave-transport">
           <button type="button" class="btn-primary" id="projPlayBtn">&#9654; Play</button>
@@ -166,6 +174,64 @@
             <button type="button" class="btn-primary" id="draftSaveBtn">Salvar parte</button>
             <button type="button" class="btn-outline" id="draftCancelBtn">Descartar</button>
           </div>
+        </div>
+      </div>
+
+      <div class="card" id="lyricsCard">
+        <div class="card-head">
+          <h3>Letra e cifra</h3>
+          <span class="muted">Cole a letra: o Whisper descobre quando cada palavra é cantada e os acordes vão em cima das sílabas.</span>
+        </div>
+        <div id="lyricsStatus" class="status-banner hidden"></div>
+
+        <div id="lyricsEditor" class="lyrics-editor">
+          <textarea id="lyricsText" rows="12" spellcheck="false" placeholder="[Verse 1]&#10;Primeira linha da letra&#10;Segunda linha&#10;&#10;[Chorus]&#10;Linhas do refrão..."></textarea>
+          <div class="row-inline">
+            <label class="inline-ctrl">Idioma
+              <select id="lyricsLang">
+                <option value="">Detectar</option>
+                <option value="pt">Português</option>
+                <option value="en">Inglês</option>
+                <option value="es">Espanhol</option>
+                <option value="fr">Francês</option>
+                <option value="it">Italiano</option>
+                <option value="de">Alemão</option>
+                <option value="ja">Japonês</option>
+              </select>
+            </label>
+            <label class="inline-ctrl">Modelo
+              <select id="lyricsModel">
+                <option value="turbo" selected>turbo (recomendado)</option>
+                <option value="medium">medium</option>
+                <option value="small">small (mais leve)</option>
+              </select>
+            </label>
+            <button type="button" class="btn-primary" id="lyricsAlignBtn">Alinhar com a voz</button>
+            <button type="button" class="btn-outline" id="lyricsDraftBtn" title="Sem letra: usa o que o Whisper ouvir como rascunho">Sem letra? Transcrever a voz</button>
+            <button type="button" class="btn-outline hidden" id="lyricsCancelBtn">Cancelar</button>
+          </div>
+          <p class="muted small" id="lyricsHint"></p>
+        </div>
+
+        <div id="lyricsView" class="lyrics-view hidden">
+          <div class="lyrics-toolbar">
+            <button type="button" class="btn-primary btn-small" id="sheetPlayBtn">&#9654; Play</button>
+            <span class="mp-time small" id="sheetTime">0:00</span>
+            <label class="inline-ctrl small" title="Mais devagar sem mudar o tom">Velocidade
+              <input type="range" id="sheetRate" min="40" max="100" step="5" value="100" />
+              <strong id="sheetRateVal" class="rate-val">100%</strong>
+            </label>
+            <label class="inline-ctrl small">Mostrar
+              <select id="sheetFilter"></select>
+            </label>
+            <label class="checkbox-row inline-ctrl small"><input type="checkbox" id="sheetNumerals" /><span>Graus no lugar dos acordes</span></label>
+            <label class="checkbox-row inline-ctrl small"><input type="checkbox" id="sheetFollow" checked /><span>Acompanhar</span></label>
+            <button type="button" class="btn-outline btn-small" id="lyricsEditBtn">Editar letra</button>
+          </div>
+          <p class="muted small" id="lyricsMeta"></p>
+          <p id="sheetNoHarmony" class="warn-text small hidden">Analise a harmonia (card abaixo) para ver os acordes em cima da letra.</p>
+          <div id="sheet" class="sheet" aria-label="Cifra"></div>
+          <p class="muted small">Clique numa linha para ir até ela. Palavras <span class="guess-sample">sublinhadas</span> não foram reconhecidas na voz, e o tempo delas é estimado.</p>
         </div>
       </div>
 

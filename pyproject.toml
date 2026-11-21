@@ -20,6 +20,7 @@ dependencies = [
     # Multi-instrument transcription (Apache-2.0; pinned commit, no PyPI release yet)
     "dettato",
     "hf_xet>=1.0",  # faster Hugging Face downloads of the Dettato weights
+    "openai-whisper>=20250625",
 ]
 
 [project.optional-dependencies]

@@ -176,6 +176,13 @@ class PartGenerate(BaseModel):
     tab: TabParams
 
 
+class LyricsRequest(BaseModel):
+    """Pasted lyrics to align to the vocals; empty text = keep what Whisper hears (a draft)."""
+    text: str = Field(default="", max_length=30000)
+    language: Optional[Literal["pt", "en", "es", "fr", "it", "de", "ja"]] = None  # None = detect
+    model: Literal["turbo", "medium", "small"] = "turbo"
+
+
 class ProjectUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=80)
     detected_bpm: Optional[float] = Field(default=None, gt=20.0, lt=320.0)

@@ -59,6 +59,12 @@ const els = {
   projStopBtn: $("projStopBtn"),
   projTime: $("projTime"),
   projRate: $("projRate"),
+  selectionBar: $("selectionBar"),
+  selDot: $("selDot"),
+  selLabel: $("selLabel"),
+  loopCheck: $("loopCheck"),
+  loopToggle: $("loopToggle"),
+  selClearBtn: $("selClearBtn"),
   projRateVal: $("projRateVal"),
   projZoom: $("projZoom"),
   projSource: $("projSource"),
@@ -483,7 +489,8 @@ async function createWave(container, stem) {
   });
   // a click outside the looped excerpt ends the loop
   ws.on("interaction", (t) => {
-    if (w.loop && (t < w.loop.start || t > w.loop.end)) w.loop = null;
+    if (w.onInteraction) w.onInteraction(t);  // project view: explicit selection + loop toggle
+    else if (w.loop && (t < w.loop.start || t > w.loop.end)) w.loop = null;
   });
   return w;
 }
@@ -546,6 +553,9 @@ async function renderProjectView() {
   hide(els.draftPanel);
   els.projZoom.value = "0";
   setProjRate(100);
+  sel.cur = null;
+  els.loopCheck.checked = false;
+  renderSelectionBar();
 
   projWave = await createWave(els.projWave, "");
   const w = projWave;
@@ -553,12 +563,21 @@ async function renderProjectView() {
     els.projTime.textContent = `${fmtClock(t)} / ${fmtClock(p.duration)}`;
     updateNowChord(t);
     syncChordLane();
+    updateSheet(t);
   };
   w.onTime(0);
-  w.ws.on("play", () => (els.projPlayBtn.innerHTML = "&#10074;&#10074; Pause"));
-  w.ws.on("pause", () => (els.projPlayBtn.innerHTML = "&#9654; Play"));
+  w.ws.on("play", () => (els.projPlayBtn.innerHTML = $("sheetPlayBtn").innerHTML = "&#10074;&#10074; Pause"));
+  w.ws.on("pause", () => (els.projPlayBtn.innerHTML = $("sheetPlayBtn").innerHTML = "&#9654; Play"));
   for (const ev of ["scroll", "zoom", "redraw", "redrawcomplete"]) w.ws.on(ev, syncChordLane);
-  w.ws.on("seeking", (t) => updateNowChord(t));
+  w.ws.on("seeking", (t) => {
+    updateNowChord(t);
+    updateSheet(t);
+  });
+  // a click on the waveform outside the selected section deselects it (a new part being drawn stays)
+  w.onInteraction = (t) => {
+    const s = sel.cur;
+    if (s && s.kind !== "draft" && (t < s.start || t > s.end)) setSelection(null);
+  };
   whenReady(w, () => {
     if (projWave !== w) return;
     drawPartRegions();
@@ -566,23 +585,31 @@ async function renderProjectView() {
     syncChordLane();
   });
   loadHarmony();
+  loadLyrics();
   w.regions.on("region-created", (region) => {
-    if (region.id.startsWith("part-")) return;
+    if (region.id.startsWith("part-") || region.id === SEL_RANGE_ID) return;
     if (w.draft && w.draft !== region) w.draft.remove();
     w.draft = region;
     snapDraft();
     showDraft();
+    setSelection(draftSelection());
   });
   w.regions.on("region-updated", (region) => {
     if (region === w.draft) {
       snapDraft();
       showDraft();
-      if (w.loop) w.loop = { start: region.start, end: region.end };
+      if (sel.cur && sel.cur.kind === "draft") setSelection(draftSelection());
     }
   });
+  // one click selects the part (cursor to its start); looping is the "Repetir trecho" toggle's job
   w.regions.on("region-clicked", (region, e) => {
     e.stopPropagation();
-    playLoop(w, region.start, region.end);
+    if (region === w.draft) setSelection(draftSelection());
+    else if (region.id.startsWith("part-")) {
+      const part = state.project.parts.find((x) => `part-${x.part_id}` === region.id);
+      if (part) setSelection(partSelection(part));
+    } else return;
+    w.ws.setTime(region.start);
   });
   w.regions.on("region-double-clicked", (region) => {
     if (region.id.startsWith("part-")) navigate(`#/p/${p.job_id}/part/${region.id.slice(5)}`);
@@ -604,7 +631,104 @@ function drawPartRegions() {
       resize: false,
     });
   }
+  styleSelection();
 }
+
+// ---------- project: selected section + loop ----------
+
+const SEL_RANGE_ID = "sel-range";
+const RANGE_COLOR = "#a78bfa";
+const sel = { cur: null };  // {kind: "part" | "draft" | "range", partId?, name, start, end, color}
+
+function partSelection(part) {
+  return { kind: "part", partId: part.part_id, name: part.name, start: part.start, end: part.end, color: partColor(part) };
+}
+function draftSelection() {
+  const r = projWave && projWave.draft;
+  if (!r) return null;
+  return { kind: "draft", name: els.draftName.value.trim() || "Novo trecho (sem nome)", start: r.start, end: r.end, color: "#f59e0b" };
+}
+
+function setSelection(s) {
+  sel.cur = s;
+  applyLoop();
+  styleSelection();
+  renderSelectionBar();
+}
+
+/** The waveform loops only when a section is selected AND "Repetir trecho" is on. */
+function applyLoop() {
+  if (!projWave) return;
+  const s = sel.cur;
+  projWave.loop = s && els.loopCheck.checked ? { start: s.start, end: s.end } : null;
+  if (projWave.loop && projWave.ws.isPlaying()) {
+    const t = projWave.ws.getCurrentTime();
+    if (t < s.start || t >= s.end) projWave.ws.setTime(s.start);
+  }
+}
+
+/** Explicit "ouvir em loop": turns the toggle on and plays the selection from its start. */
+function playSelectionLoop(s) {
+  if (!projWave || !s) return;
+  els.loopCheck.checked = true;
+  setSelection(s);
+  projWave.ws.setTime(s.start);
+  projWave.ws.play();
+}
+
+function styleSelection() {
+  const w = projWave;
+  if (!w) return;
+  const s = sel.cur;
+  for (const part of state.project.parts) {
+    const region = w.regions.getRegions().find((r) => r.id === `part-${part.part_id}`);
+    if (!region) continue;
+    const selected = !!s && s.kind === "part" && s.partId === part.part_id;
+    region.setOptions({ color: withAlpha(partColor(part), selected ? 0.45 : s ? 0.12 : 0.22) });
+    if (region.element) {
+      region.element.style.boxShadow = selected ? `inset 0 0 0 2px ${partColor(part)}` : "";
+      region.element.style.zIndex = selected ? "3" : "";
+    }
+  }
+  // a progression picked in the harmony card has no part: show it as a temporary region
+  const old = w.regions.getRegions().find((r) => r.id === SEL_RANGE_ID);
+  if (old) old.remove();
+  if (s && s.kind === "range") {
+    const region = w.regions.addRegion({
+      id: SEL_RANGE_ID, start: s.start, end: s.end, color: withAlpha(RANGE_COLOR, 0.35), drag: false, resize: false,
+    });
+    if (region && region.element) region.element.style.boxShadow = `inset 0 0 0 2px ${RANGE_COLOR}`;
+  }
+  for (const row of els.partList.querySelectorAll(".part-row")) {
+    row.classList.toggle("selected", !!s && s.kind === "part" && row.dataset.partId === s.partId);
+  }
+}
+
+function renderSelectionBar() {
+  const s = sel.cur;
+  els.selectionBar.classList.toggle("has-selection", !!s);
+  els.selDot.style.background = s ? s.color : "";
+  els.selLabel.innerHTML = "";
+  if (s) {
+    els.selLabel.append("Trecho selecionado: ", el("strong", {}, s.name), el("span", { class: "muted" }, ` · ${fmtRange(s.start, s.end)}`));
+  } else {
+    els.selLabel.append(el("strong", {}, "Nenhum trecho selecionado"),
+      el("span", { class: "muted" }, " · o Play toca a música inteira. Clique numa parte ou arraste sobre a onda para selecionar."));
+  }
+  els.loopCheck.disabled = !s;
+  els.loopToggle.classList.toggle("is-disabled", !s);
+  els.loopToggle.classList.toggle("active", !!s && els.loopCheck.checked);
+  show(els.selClearBtn, !!s);
+}
+
+els.loopCheck.addEventListener("change", () => {
+  applyLoop();
+  renderSelectionBar();
+});
+els.selClearBtn.addEventListener("click", () => {
+  if (sel.cur && sel.cur.kind === "draft") discardDraft();
+  else setSelection(null);
+});
 
 function snapDraft() {
   const r = projWave.draft;
@@ -623,15 +747,12 @@ function showDraft() {
 
 function discardDraft() {
   if (projWave && projWave.draft) {
-    if (projWave.loop) {
-      projWave.loop = null;
-      projWave.ws.pause();
-    }
     projWave.draft.remove();
     projWave.draft = null;
   }
   els.draftName.value = "";
   hide(els.draftPanel);
+  if (sel.cur && sel.cur.kind === "draft") setSelection(null);
 }
 
 $("nameChips").addEventListener("click", (e) => {
@@ -644,11 +765,14 @@ $("nameChips").addEventListener("click", (e) => {
   for (let i = 2; taken.has(name); i++) name = `${base} ${i}`;
   els.draftName.value = name;
   els.draftName.focus();
+  if (sel.cur && sel.cur.kind === "draft") setSelection(draftSelection());
+});
+els.draftName.addEventListener("input", () => {
+  if (sel.cur && sel.cur.kind === "draft") setSelection(draftSelection());
 });
 
 els.draftPlayBtn.addEventListener("click", () => {
-  const r = projWave && projWave.draft;
-  if (r) playLoop(projWave, r.start, r.end);
+  playSelectionLoop(draftSelection());
 });
 els.draftCancelBtn.addEventListener("click", discardDraft);
 els.draftName.addEventListener("keydown", (e) => {
@@ -673,6 +797,9 @@ els.draftSaveBtn.addEventListener("click", async () => {
     hide(els.projectStatus);
     drawPartRegions();
     renderPartList();
+    // the section just saved stays selected (and looping, if it was)
+    const saved = state.project.parts.find((x) => x.part_id === data.part.part_id);
+    if (saved) setSelection(partSelection(saved));
   } catch (err) {
     banner(els.projectStatus, `Erro ao salvar a parte: ${err.message}`, "error");
   } finally {
@@ -689,7 +816,7 @@ function renderPartList() {
     const status = ready
       ? el("span", { class: "badge ok" }, `tab pronta · ${part.stats.total_notes || 0} notas`)
       : el("span", { class: "badge" }, "sem tab");
-    const row = el("div", { class: "part-row" },
+    const row = el("div", { class: "part-row", dataset: { partId: part.part_id } },
       el("span", { class: "part-dot", style: `background:${partColor(part)}` }),
       el("strong", { class: "part-name" }, part.name),
       el("span", { class: "muted" }, fmtRange(part.start, part.end)),
@@ -699,23 +826,35 @@ function renderPartList() {
           type: "button",
           class: "btn-outline btn-small",
           title: "Ouvir em loop",
-          onclick: () => projWave && playLoop(projWave, part.start, part.end),
+          onclick: () => playSelectionLoop(partSelection(part)),
         }, "⟳ Ouvir"),
         el("a", { class: "btn-primary btn-small", href: `#/p/${state.project.job_id}/part/${part.part_id}` },
           ready ? "Estudar →" : "Transcrever →")));
     els.partList.append(row);
   }
+  styleSelection();
   renderHarmonyParts();
+  if (lyricsIsCurrent() && L.data && L.data.lyrics) renderSheetFilter();
 }
 
 els.projPlayBtn.addEventListener("click", () => {
-  if (!projWave) return;
-  projWave.ws.playPause();
+  const w = projWave;
+  if (!w) return;
+  if (w.ws.isPlaying()) {
+    w.ws.pause();
+    return;
+  }
+  if (w.loop) {
+    const t = w.ws.getCurrentTime();
+    if (t < w.loop.start || t >= w.loop.end - 0.05) w.ws.setTime(w.loop.start);
+  }
+  w.ws.play();
 });
 els.projStopBtn.addEventListener("click", () => {
-  if (!projWave) return;
-  projWave.loop = null;
-  projWave.ws.stop();
+  const w = projWave;
+  if (!w) return;
+  w.ws.pause();
+  w.ws.setTime(w.loop ? w.loop.start : 0);
 });
 els.projZoom.addEventListener("input", () => {
   if (projWave && projWave.ws.getDecodedData()) projWave.ws.zoom(Number(els.projZoom.value));
@@ -729,12 +868,16 @@ els.projSource.addEventListener("change", () => {
 
 /** Slower playback keeping the pitch, so the chords still match what you play. */
 function setProjRate(pct) {
-  els.projRate.value = String(pct);
-  els.projRateVal.textContent = `${pct}%`;
-  els.projRateVal.classList.toggle("slowed", pct < 100);
+  // two sliders (transport and chord sheet) drive the same playback rate
+  for (const [slider, label] of [[els.projRate, els.projRateVal], [$("sheetRate"), $("sheetRateVal")]]) {
+    slider.value = String(pct);
+    label.textContent = `${pct}%`;
+    label.classList.toggle("slowed", pct < 100);
+  }
   if (projWave) projWave.ws.setPlaybackRate(pct / 100, true);
 }
 els.projRate.addEventListener("input", () => setProjRate(Number(els.projRate.value)));
+$("sheetRate").addEventListener("input", () => setProjRate(Number($("sheetRate").value)));
 els.snapCheck.addEventListener("change", () => {
   if (projWave && projWave.draft) {
     snapDraft();
@@ -967,6 +1110,7 @@ async function runHarmony() {
       H.highlight = null;
       hide(hEls.status);
       renderHarmony();
+      if (L.data && L.data.lyrics) loadLyrics();  // new chords for the sheet
     }
   } catch (err) {
     banner(hEls.status, `Erro: ${err.message}`, "error");
@@ -1077,7 +1221,10 @@ function renderLoops(h) {
       type: "button",
       class: "loop-row",
       title: "Ouvir a primeira ocorrência em loop",
-      onclick: () => projWave && playLoop(projWave, loop.starts[0], loop.ends[0]),
+      onclick: () => playSelectionLoop({
+        kind: "range", name: `Progressão ${loop.chords.join(" → ")}`,
+        start: loop.starts[0], end: loop.ends[0], color: RANGE_COLOR,
+      }),
     }, seq, el("span", { class: "badge" }, `${loop.count}×`), el("span", { class: "muted small" }, `1ª vez em ${fmtClock(loop.starts[0], 0)}`)));
   }
 }
@@ -1220,6 +1367,267 @@ function updateNowChord(t, force = false) {
   if (cur.explain) info.push(cur.explain);
   else if (fn !== "X") info.push(H.data.field[cur.degree - 1].function_pt + ".");
   hEls.liveInfo.textContent = info.join(" ");
+}
+
+// ---------- project: lyrics + chord sheet ----------
+
+const L = {
+  data: null,       // {lyrics, sheet, has_harmony}
+  projectId: null,
+  loaded: false,
+  rows: [],         // rendered rows: {start, end, node, words: [{start, node}]}
+  curRow: -1,
+};
+const lEls = {
+  status: $("lyricsStatus"),
+  editor: $("lyricsEditor"),
+  text: $("lyricsText"),
+  lang: $("lyricsLang"),
+  model: $("lyricsModel"),
+  alignBtn: $("lyricsAlignBtn"),
+  draftBtn: $("lyricsDraftBtn"),
+  cancelBtn: $("lyricsCancelBtn"),
+  hint: $("lyricsHint"),
+  view: $("lyricsView"),
+  meta: $("lyricsMeta"),
+  noHarmony: $("sheetNoHarmony"),
+  sheet: $("sheet"),
+  filter: $("sheetFilter"),
+  numerals: $("sheetNumerals"),
+  follow: $("sheetFollow"),
+  editBtn: $("lyricsEditBtn"),
+  playBtn: $("sheetPlayBtn"),
+  time: $("sheetTime"),
+};
+
+function lyricsIsCurrent() {
+  return !!state.project && L.projectId === state.project.job_id;
+}
+
+async function loadLyrics() {
+  const projectId = state.project.job_id;
+  L.projectId = projectId;
+  L.data = null;
+  L.loaded = false;
+  L.curRow = -1;
+  hide(lEls.status);
+  lEls.text.value = "";
+  renderLyrics();
+  try {
+    const data = await api(projectUrl("/lyrics"));
+    if (L.projectId !== projectId) return;
+    L.data = data;
+    L.loaded = true;
+    renderLyrics();
+  } catch (err) {
+    banner(lEls.status, `Erro ao carregar a letra: ${err.message}`, "error");
+  }
+}
+
+async function runLyrics(useText) {
+  if (state.busy || !state.project) return;
+  const text = useText ? lEls.text.value : "";
+  if (useText && !text.trim()) {
+    banner(lEls.status, "Cole a letra na caixa (ou use \"Sem letra? Transcrever a voz\").", "error");
+    lEls.text.focus();
+    return;
+  }
+  setBusy(true);
+  lEls.alignBtn.disabled = lEls.draftBtn.disabled = true;
+  banner(lEls.status, onDevice(
+    "Ouvindo a voz com o Whisper e alinhando a letra... leva alguns minutos (na primeira vez o modelo é baixado).",
+    "Ouvindo a voz com o Whisper na CPU... pode levar bem mais que 10 minutos."), "busy");
+  const projectId = state.project.job_id;
+  try {
+    const data = await postJson(`/api/projects/${projectId}/lyrics`, {
+      text, language: lEls.lang.value || null, model: lEls.model.value,
+    });
+    if (L.projectId === projectId) {
+      L.data = data;
+      L.loaded = true;
+      L.editing = false;
+      L.curRow = -1;
+      hide(lEls.status);
+      renderLyrics();
+    }
+  } catch (err) {
+    banner(lEls.status, `Erro: ${err.message}`, "error");
+  } finally {
+    lEls.alignBtn.disabled = lEls.draftBtn.disabled = false;
+    setBusy(false);
+  }
+}
+lEls.alignBtn.addEventListener("click", () => runLyrics(true));
+lEls.draftBtn.addEventListener("click", () => runLyrics(false));
+lEls.editBtn.addEventListener("click", () => {
+  L.editing = true;
+  lEls.text.value = L.data.lyrics.text;
+  renderLyrics();
+  lEls.text.focus();
+});
+lEls.cancelBtn.addEventListener("click", () => {
+  L.editing = false;
+  renderLyrics();
+});
+lEls.playBtn.addEventListener("click", () => els.projPlayBtn.click());
+lEls.numerals.addEventListener("change", () => renderSheet());
+lEls.filter.addEventListener("change", () => renderSheet());
+
+function lyricsHintText() {
+  const p = state.project;
+  const parts = [];
+  if (!p.stems.vocals && !p.is_isolated_stem) {
+    parts.push("Sem a stem de vocais o Whisper ouve a música inteira e erra mais: separe as stems em \"Análise da música\" antes.");
+  }
+  parts.push("Mantenha uma linha por verso; tags como [Verse] e [Chorus] viram títulos de seção.");
+  parts.push(`Leva uns ${Math.max(1, Math.round((p.duration / 60) * 0.5))}–${Math.max(2, Math.round((p.duration / 60) * 0.6))} min com GPU. Na primeira vez o modelo é baixado (~1,5 GB).`);
+  return parts.join(" ");
+}
+
+function renderLyrics() {
+  if (!lyricsIsCurrent()) return;
+  const d = L.data;
+  const has = !!(d && d.lyrics);
+  const editing = !has || L.editing;
+  show(lEls.editor, L.loaded && editing);
+  show(lEls.view, has && !L.editing);
+  show(lEls.cancelBtn, has && L.editing);
+  lEls.alignBtn.textContent = has ? "Alinhar de novo" : "Alinhar com a voz";
+  lEls.hint.textContent = lyricsHintText();
+  if (!has) {
+    L.rows = [];
+    lEls.sheet.innerHTML = "";
+    return;
+  }
+  const ly = d.lyrics;
+  const share = Math.round(ly.stats.matched_share * 100);
+  lEls.meta.textContent = (ly.mode === "whisper"
+    ? "Rascunho do Whisper (pode ter palavras erradas): corrija em \"Editar letra\" e alinhe de novo. "
+    : `${share}% das palavras reconhecidas na voz. `)
+    + `${ly.stats.lines} linhas · Whisper ${ly.model} (${ly.device === "cuda" ? "GPU" : "CPU"}) · ${ly.source}.`;
+  show(lEls.noHarmony, !d.has_harmony);
+  renderSheetFilter();
+  renderSheet();
+}
+
+function renderSheetFilter() {
+  if (!state.project) return;
+  const cur = lEls.filter.value;
+  lEls.filter.innerHTML = "";
+  lEls.filter.append(el("option", { value: "" }, "Música inteira"));
+  for (const part of state.project.parts) lEls.filter.append(el("option", { value: part.part_id }, `Só: ${part.name}`));
+  lEls.filter.value = [...lEls.filter.options].some((o) => o.value === cur) ? cur : "";
+}
+
+/** Chord columns for the current label mode (numerals are longer than names: re-space them). */
+function sheetChordCols(chords, useNumerals) {
+  let next = 0;
+  return chords.map((c) => {
+    const text = useNumerals ? c.numeral : c.label;
+    const col = Math.max(c.pos, next);
+    next = col + text.length + 1;
+    return { ...c, text, col };
+  });
+}
+
+function renderSheet() {
+  if (!L.data || !L.data.sheet) return;
+  const useNumerals = lEls.numerals.checked;
+  const partId = lEls.filter.value;
+  const part = partId ? state.project.parts.find((x) => x.part_id === partId) : null;
+  const inRange = (it) => !part || (it.end > part.start + 0.05 && it.start < part.end - 0.05);
+  lEls.sheet.innerHTML = "";
+  L.rows = [];
+  L.curRow = -1;
+  const seek = (t) => projWave && projWave.ws.setTime(Math.max(0, t));
+  const items = L.data.sheet;
+  items.forEach((it, i) => {
+    if (it.kind === "section") {
+      const nextRow = items.slice(i + 1).find((x) => x.kind !== "section");
+      if (part && !(nextRow && inRange(nextRow))) return;
+      lEls.sheet.append(el("div", { class: "sheet-section" }, it.name));
+      return;
+    }
+    if (!inRange(it)) return;
+    if (it.kind === "chords") {
+      const row = el("div", { class: "sheet-row sheet-instr", onclick: () => seek(it.start) },
+        el("span", { class: "instr-mark", title: "Trecho instrumental" }, "♪"));
+      for (const c of it.chords) {
+        row.append(el("button", {
+          type: "button",
+          class: `instr-chord fn-${c.fn}`,
+          title: `${c.label} · ${c.numeral} · ${fmtClock(c.start)}`,
+          onclick: (e) => { e.stopPropagation(); seek(c.start); },
+        }, useNumerals ? c.numeral : c.label));
+      }
+      lEls.sheet.append(row);
+      L.rows.push({ start: it.start, end: it.end, node: row, words: [] });
+      return;
+    }
+    // lyric line: chords absolutely placed by character column over the words
+    const cols = sheetChordCols(it.chords, useNumerals);
+    const width = Math.max(it.text.length, ...cols.map((c) => c.col + c.text.length));
+    const chordLine = el("div", { class: "sheet-chords" + (cols.length ? "" : " empty") });
+    for (const c of cols) {
+      chordLine.append(el("button", {
+        type: "button",
+        class: `sheet-chord fn-${c.fn}`,
+        style: `left:${c.col}ch`,
+        title: `${c.label} · ${c.numeral} · ${fmtClock(c.start)}`,
+        onclick: (e) => { e.stopPropagation(); seek(c.start); },
+      }, c.text));
+    }
+    const textLine = el("div", { class: "sheet-text" });
+    const words = [];
+    it.words.forEach((w, k) => {
+      if (k) textLine.append(" ");
+      const node = el("span", { class: "sheet-word" + (w.matched ? "" : " guess") }, it.text.substr(w.offset, w.len));
+      textLine.append(node);
+      words.push({ start: w.start, node });
+    });
+    const row = el("div", {
+      class: "sheet-row sheet-lyric" + (it.para ? " para" : ""),
+      style: `min-width:${width + 1}ch`,
+      title: `${fmtClock(it.start)} · clique para ir até aqui`,
+      onclick: () => seek(it.start - 0.15),
+    }, chordLine, textLine);
+    lEls.sheet.append(row);
+    L.rows.push({ start: it.start, end: it.end, node: row, words });
+  });
+  if (!L.rows.length) lEls.sheet.append(el("p", { class: "muted" }, "Nada cantado nesta parte."));
+  updateSheet(projWave ? projWave.ws.getCurrentTime() : 0, true);
+}
+
+/** Highlight the line (and the words already sung) under the playhead; keep it in view. */
+function updateSheet(t, force = false) {
+  if (!lyricsIsCurrent() || !L.rows.length) return;
+  lEls.time.textContent = fmtClock(t, 0);
+  let idx = -1;
+  for (let i = 0; i < L.rows.length; i++) {
+    if (L.rows[i].start <= t + 0.05) idx = i;
+    else break;
+  }
+  if (idx >= 0 && t > L.rows[idx].end + 1.0) idx = -1;  // between lines: nothing lit
+  if (idx !== L.curRow || force) {
+    if (L.curRow >= 0 && L.rows[L.curRow]) {
+      const old = L.rows[L.curRow];
+      old.node.classList.remove("current");
+      old.words.forEach((w) => w.node.classList.remove("sung"));
+    }
+    L.curRow = idx;
+    if (idx >= 0) {
+      const row = L.rows[idx].node;
+      row.classList.add("current");
+      if (lEls.follow.checked) {
+        const box = lEls.sheet;
+        const top = row.offsetTop - box.clientHeight * 0.3;
+        if (row.offsetTop < box.scrollTop || row.offsetTop + row.offsetHeight > box.scrollTop + box.clientHeight * 0.8) {
+          box.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
+        }
+      }
+    }
+  }
+  if (idx >= 0) for (const w of L.rows[idx].words) w.node.classList.toggle("sung", w.start <= t);
 }
 
 // ---------- view: part ----------

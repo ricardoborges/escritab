@@ -9,6 +9,7 @@ from app.job_manager import JobManager
 import shutil
 from app.models import (
     JobMetadata,
+    LyricsRequest,
     MultitrackRequest,
     PartCreate,
     PartGenerate,
@@ -223,6 +224,25 @@ def create_app(workspace_root: Path | str = Path("workspace/jobs")) -> FastAPI:
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"Falha na análise harmônica: {exc}") from exc
         return {"harmony": result}
+
+    @app.get("/api/projects/{project_id}/lyrics")
+    def get_lyrics(project_id: str):
+        """Saved lyrics (timed lines) and the chord sheet; nulls when no lyrics were loaded."""
+        job, job_dir = load(project_id)
+        return projects.lyrics_payload(job, job_dir)
+
+    @app.post("/api/projects/{project_id}/lyrics")
+    def align_lyrics(project_id: str, req: LyricsRequest):
+        job, job_dir = load(project_id)
+        if projects.ensure_project(job, job_dir):
+            manager.save_job(job)
+        try:
+            projects.align_project_lyrics(job, job_dir, req.text, req.language, req.model)
+        except PartError as exc:
+            raise part_error(exc) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Falha ao alinhar a letra: {exc}") from exc
+        return projects.lyrics_payload(job, job_dir)
 
     # ---------- parts ----------
 
