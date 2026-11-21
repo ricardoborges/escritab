@@ -272,12 +272,31 @@ def midi_file_to_notes(midi_path: Path) -> list[NoteEvent]:
     return notes
 
 
-def transcribe_audio_to_midi(
+def _extract_raw_notes(
     audio_path: Path,
+    params: TranscriptionParams,
+) -> tuple[list[NoteEvent], str]:
+    """Run the requested engine; fall back to Basic Pitch if Dettato is missing or fails."""
+    if params.engine == "dettato":
+        from app.pipeline import dettato_transcriber
+
+        if not dettato_transcriber.is_available():
+            reason = "dettato não instalado"
+        else:
+            try:
+                return dettato_transcriber.transcribe_stem_notes(audio_path), "dettato"
+            except Exception as exc:  # weights download, OOM, unreadable audio...
+                reason = f"dettato falhou: {exc}"[:200]
+        return _run_basic_pitch_or_fallback(audio_path, params), f"basic_pitch (fallback — {reason})"
+    return _run_basic_pitch_or_fallback(audio_path, params), "basic_pitch"
+
+
+def finalize_notes_to_midi(
+    raw_notes: list[NoteEvent],
     output_midi_path: Path,
     params: TranscriptionParams,
 ) -> tuple[list[NoteEvent], dict[str, int | float | str]]:
-    raw_notes = _run_basic_pitch_or_fallback(audio_path, params)
+    """Guitar post-processing (range folding, harmonics, polyphony cap, quantization) + MIDI write."""
     cleaned_notes, stats = postprocess_notes(raw_notes, params)
     if cleaned_notes:
         notes_to_midi_file(cleaned_notes, output_midi_path, bpm=params.bpm)
@@ -285,4 +304,15 @@ def transcribe_audio_to_midi(
         max_p = max(n.pitch for n in cleaned_notes)
         stats["lowest_note"] = str(librosa.midi_to_note(min_p))
         stats["highest_note"] = str(librosa.midi_to_note(max_p))
+    return cleaned_notes, stats
+
+
+def transcribe_audio_to_midi(
+    audio_path: Path,
+    output_midi_path: Path,
+    params: TranscriptionParams,
+) -> tuple[list[NoteEvent], dict[str, int | float | str]]:
+    raw_notes, engine_used = _extract_raw_notes(audio_path, params)
+    cleaned_notes, stats = finalize_notes_to_midi(raw_notes, output_midi_path, params)
+    stats["engine"] = engine_used
     return cleaned_notes, stats

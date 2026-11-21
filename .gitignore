@@ -6,3 +6,11 @@ venv/
 workspace/
 .worktrees/
 .superpowers/
+
+# local test audio (copyrighted / large)
+/*.mp3
+/*.wav
+/*.flac
+
+# local SoundFont library (junction or folder)
+/soundfonts

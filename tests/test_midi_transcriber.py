@@ -73,6 +73,7 @@ def test_midi_roundtrip_and_audio_transcription(tmp_path: Path):
 
     midi_path = tmp_path / "guitar_clean.mid"
     params = TranscriptionParams(
+        engine="basic_pitch",
         onset_threshold=0.3,
         frame_threshold=0.2,
         minimum_note_length_ms=50.0,

@@ -72,6 +72,12 @@ TUNINGS: dict[str, TuningPreset] = {
 
 
 class TranscriptionParams(BaseModel):
+    # "dettato": multi-instrument neural transcriber (default); "basic_pitch": legacy single-stem model
+    engine: Literal["dettato", "basic_pitch"] = "dettato"
+    # "stem": transcribe the selected Demucs stem(s); "multitrack": reuse tracks of the full-song Dettato MIDI
+    source: Literal["stem", "multitrack"] = "stem"
+    # multitrack only: indices of the full-song MIDI tracks to put on the tab (empty = every guitar track)
+    track_indices: list[int] = Field(default_factory=list)
     stem: str = "guitar"
     bandpass_enabled: bool = True
     lowcut_hz: float = 75.0
@@ -117,21 +123,84 @@ class TabSlice(BaseModel):
     notes: list[FrettedNote]
 
 
+class MultitrackRequest(BaseModel):
+    # split each guitar track into "Base" (rhythm) and "Solo/Riff" (lead) tracks
+    split_guitar_roles: bool = True
+
+
 class SeparateRequest(BaseModel):
     model: Literal["htdemucs_6s", "htdemucs"] = "htdemucs_6s"
 
 
+class MidiTrackInfo(BaseModel):
+    index: int  # instrument position inside the multi-track MIDI file
+    name: str
+    program: Optional[int] = None  # General MIDI program 0-127 (None for drums)
+    is_drum: bool = False
+    is_guitar: bool = False
+    # "rhythm" / "lead": halves of a guitar track split by musical role;
+    # "lead_candidate": a non-guitar track that plays like a lead guitar (often a mis-named solo)
+    role: Optional[Literal["rhythm", "lead", "lead_candidate"]] = None
+    note_count: int = 0
+    lowest_note: Optional[str] = None
+    highest_note: Optional[str] = None
+
+
+class Part(BaseModel):
+    """A named excerpt of the song ("Intro", "Riff", "Solo"...) with its own MIDI and tab."""
+    part_id: str
+    name: str
+    start: float  # seconds in the original audio
+    end: float
+    created_at: str
+    transcription_params: Optional[TranscriptionParams] = None
+    tab_params: Optional[TabParams] = None
+    artifacts: dict[str, str] = Field(default_factory=dict)  # files inside parts/<part_id>/
+    stats: dict[str, int | float | str] = Field(default_factory=dict)
+
+
+class PartCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=60)
+    start: float = Field(ge=0.0)
+    end: float = Field(gt=0.0)
+
+
+class PartUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=60)
+    start: Optional[float] = Field(default=None, ge=0.0)
+    end: Optional[float] = Field(default=None, gt=0.0)
+
+
+class PartGenerate(BaseModel):
+    transcription: TranscriptionParams
+    tab: TabParams
+
+
+class ProjectUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=80)
+    detected_bpm: Optional[float] = Field(default=None, gt=20.0, lt=320.0)
+
+
 class JobMetadata(BaseModel):
+    """A project: one song, analysed once (full-song Dettato MIDI and/or Demucs stems), split into parts."""
     job_id: str
     created_at: str
     original_filename: str
     input_path: str
+    name: str = ""
+    # analysis chosen when the project was created: "dettato" (whole song) or "classic" (Demucs first)
+    mode: Literal["dettato", "classic"] = "classic"
     is_isolated_stem: bool = False
     detected_bpm: float = 120.0
+    duration: float = 0.0
+    beats: list[float] = Field(default_factory=list)  # beat times (s), used to snap part edges
     separation_device: Optional[str] = None
     stems: dict[str, str] = Field(default_factory=dict)
+    artifacts: dict[str, str] = Field(default_factory=dict)  # project-level files (full-song MIDI...)
+    multitrack: list[MidiTrackInfo] = Field(default_factory=list)
+    parts: list[Part] = Field(default_factory=list)
+    # legacy single-tab sessions (before parts existed); migrated into a "Música inteira" part
     selected_stem: Optional[str] = None
     transcription_params: Optional[TranscriptionParams] = None
     tab_params: Optional[TabParams] = None
-    artifacts: dict[str, str] = Field(default_factory=dict)
     stats: dict[str, int | float | str] = Field(default_factory=dict)

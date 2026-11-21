@@ -1,29 +1,33 @@
 from __future__ import annotations
 from pathlib import Path
 import re
+from typing import Literal
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from app.job_manager import JobManager
+import shutil
 from app.models import (
+    JobMetadata,
+    MultitrackRequest,
+    PartCreate,
+    PartGenerate,
+    PartUpdate,
+    ProjectUpdate,
     SeparateRequest,
     TUNINGS,
-    TabParams,
-    TranscriptionParams,
 )
-from app.pipeline.audio_cleaner import detect_bpm, prepare_clean_audio
-from app.pipeline.exporters import export_ascii_tab, export_gp5, export_musicxml
-from app.pipeline.fretboard import optimize_fretboard
-from app.pipeline.midi_transcriber import (
-    midi_file_to_notes,
-    transcribe_audio_to_midi,
-)
+from app import projects
+from app.projects import PartError
+from app.pipeline import dettato_transcriber
 from app.pipeline.stem_separator import separate_stems
+from app.system_info import get_compute_info
+from app import soundfonts
 
 
 def create_app(workspace_root: Path | str = Path("workspace/jobs")) -> FastAPI:
     app = FastAPI(
-        title="EscriTab — Suno / Audio to Guitar Tab",
+        title="EscriTab — aprenda a música por partes",
         version="1.0.0",
     )
     manager = JobManager(workspace_root=workspace_root)
@@ -34,196 +38,238 @@ def create_app(workspace_root: Path | str = Path("workspace/jobs")) -> FastAPI:
     def list_tunings():
         return list(TUNINGS.values())
 
-    @app.get("/api/jobs")
-    def list_jobs():
-        return manager.list_jobs()
+    @app.get("/api/system")
+    def system_info():
+        return get_compute_info()
 
-    @app.get("/api/jobs/{job_id}")
-    def get_job(job_id: str):
+    @app.get("/api/soundfonts")
+    def list_soundfonts():
+        return {
+            "dirs": [str(d) for d in soundfonts.soundfont_dirs()],
+            "soundfonts": soundfonts.public(soundfonts.list_soundfonts()),
+        }
+
+    @app.get("/api/soundfonts/{sf_id}")
+    def get_soundfont(sf_id: str):
+        path = soundfonts.path_for(sf_id)
+        if path is None:
+            raise HTTPException(status_code=404, detail="SoundFont não encontrada.")
+        path = soundfonts.servable_path(path, Path(workspace_root).parent / "soundfont_cache")
+        return FileResponse(path=str(path), media_type="application/octet-stream",
+                            headers={"Cache-Control": "max-age=86400"})
+
+    def load(project_id: str) -> tuple[JobMetadata, Path]:
         try:
-            return manager.get_job(job_id)
+            job = manager.get_job(project_id)
         except FileNotFoundError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+            raise HTTPException(status_code=404, detail="Projeto não encontrado.") from exc
+        return job, manager.get_job_dir(project_id)
 
-    @app.post("/api/jobs/upload")
-    async def upload_audio(
+    def safe_file(folder: Path, filename: str):
+        safe_name = re.sub(r"[^A-Za-z0-9._-]", "", Path(filename).name)
+        file_path = folder / safe_name
+        if not safe_name or not file_path.is_file():
+            raise HTTPException(status_code=404, detail="Arquivo não encontrado.")
+        return FileResponse(path=str(file_path), filename=safe_name)
+
+    def part_error(exc: PartError) -> HTTPException:
+        return HTTPException(status_code=exc.status, detail=str(exc))
+
+    # ---------- projects ----------
+
+    @app.get("/api/projects")
+    def list_projects():
+        return [
+            {
+                "job_id": j.job_id,
+                "name": j.name or projects.default_name(j.original_filename),
+                "original_filename": j.original_filename,
+                "created_at": j.created_at,
+                "mode": j.mode,
+                "duration": j.duration,
+                "parts": [p.name for p in j.parts],
+                "has_multitrack": bool(j.multitrack),
+                "has_stems": bool(j.stems),
+            }
+            for j in manager.list_jobs()
+        ]
+
+    @app.post("/api/projects")
+    async def create_project(
         file: UploadFile = File(...),
+        name: str = Form(""),
         is_isolated_stem: bool = Form(False),
+        mode: Literal["dettato", "classic"] = Form("dettato"),
     ):
         audio_bytes = await file.read()
         if not audio_bytes:
             raise HTTPException(status_code=400, detail="Arquivo de áudio vazio.")
-
         filename = file.filename or "audio.wav"
         job = manager.create_job(
-            original_filename=filename,
-            is_isolated_stem=is_isolated_stem,
-            audio_bytes=audio_bytes,
+            original_filename=filename, is_isolated_stem=is_isolated_stem, audio_bytes=audio_bytes
         )
+        job.mode = mode
+        job.name = name.strip()[:80] or projects.default_name(filename)
         job_dir = manager.get_job_dir(job.job_id)
-        input_path = job_dir / job.input_path
-        job.detected_bpm = detect_bpm(input_path, default_bpm=120.0)
+        try:
+            projects.analyze_audio(job, job_dir)
+        except Exception as exc:
+            shutil.rmtree(job_dir, ignore_errors=True)
+            raise HTTPException(status_code=400, detail=f"Não foi possível ler o áudio: {exc}") from exc
         if is_isolated_stem:
-            stems_map, device = separate_stems(
-                input_audio_path=input_path,
-                job_dir=job_dir,
-                is_isolated_stem=True,
+            job.stems, job.separation_device = separate_stems(
+                input_audio_path=job_dir / job.input_path, job_dir=job_dir, is_isolated_stem=True
             )
-            job.stems = stems_map
-            job.separation_device = device
-            job.selected_stem = "guitar"
         manager.save_job(job)
         return job
 
-    @app.post("/api/jobs/{job_id}/separate")
-    def separate_job_stems(job_id: str, req: SeparateRequest = SeparateRequest()):
-        try:
-            job = manager.get_job(job_id)
-        except FileNotFoundError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+    @app.get("/api/projects/{project_id}")
+    def get_project(project_id: str):
+        job, job_dir = load(project_id)
+        if projects.ensure_project(job, job_dir):
+            manager.save_job(job)
+        return job
 
-        job_dir = manager.get_job_dir(job_id)
-        input_path = job_dir / job.input_path
+    @app.patch("/api/projects/{project_id}")
+    def update_project(project_id: str, req: ProjectUpdate):
+        job, _ = load(project_id)
+        if req.name is not None:
+            job.name = req.name.strip()
+        if req.detected_bpm is not None:
+            job.detected_bpm = round(req.detected_bpm, 1)
+        manager.save_job(job)
+        return job
+
+    @app.delete("/api/projects/{project_id}")
+    def delete_project(project_id: str):
+        _, job_dir = load(project_id)
+        shutil.rmtree(job_dir, ignore_errors=True)
+        return {"deleted": project_id}
+
+    @app.get("/api/projects/{project_id}/peaks")
+    def get_peaks(project_id: str):
+        job, job_dir = load(project_id)
+        if not (job_dir / projects.PEAKS_FILE).exists():
+            projects.analyze_audio(job, job_dir)
+            manager.save_job(job)
+        return FileResponse(path=str(job_dir / projects.PEAKS_FILE), media_type="application/json")
+
+    @app.get("/api/projects/{project_id}/files/{filename}")
+    def get_project_file(project_id: str, filename: str):
+        _, job_dir = load(project_id)
+        return safe_file(job_dir, filename)
+
+    # ---------- analysis (once per project) ----------
+
+    @app.post("/api/projects/{project_id}/separate")
+    def separate_project_stems(project_id: str, req: SeparateRequest = SeparateRequest()):
+        job, job_dir = load(project_id)
         try:
             stems_map, device = separate_stems(
-                input_audio_path=input_path,
+                input_audio_path=job_dir / job.input_path,
                 job_dir=job_dir,
                 is_isolated_stem=job.is_isolated_stem,
                 model_name=req.model,
             )
         except Exception as exc:
-            raise HTTPException(
-                status_code=500, detail=f"Falha ao separar stems: {exc}"
-            ) from exc
-
+            raise HTTPException(status_code=500, detail=f"Falha ao separar stems: {exc}") from exc
         job.stems = stems_map
         job.separation_device = device
-        if "guitar" in stems_map:
-            job.selected_stem = "guitar"
-        elif stems_map:
-            job.selected_stem = next(iter(stems_map.keys()))
+        for cache in job_dir.glob("stem_notes_*.json"):  # new stems: old stem transcriptions are stale
+            cache.unlink()
         manager.save_job(job)
+        return {"job": job, "device": device}
 
-        stem_urls = {
-            name: f"/api/jobs/{job_id}/files/{fname}"
-            for name, fname in stems_map.items()
-        }
+    @app.post("/api/projects/{project_id}/multitrack")
+    def transcribe_full_song(project_id: str, req: MultitrackRequest = MultitrackRequest()):
+        """Full-song, multi-instrument MIDI (one track per instrument + drums) with Dettato.
+
+        Runs on the original upload so the drum model gets the full sample rate."""
+        job, job_dir = load(project_id)
+        if not dettato_transcriber.is_available():
+            raise HTTPException(
+                status_code=503, detail="Dettato não está instalado. Rode: pip install -r requirements.txt"
+            )
+        full_midi = job_dir / "full_song.mid"
+        try:
+            tracks, info = dettato_transcriber.transcribe_multitrack(
+                job_dir / job.input_path, full_midi, split_guitar_roles=req.split_guitar_roles
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Falha na transcrição multi-instrumento: {exc}") from exc
+        job.multitrack = tracks
+        job.artifacts["multitrack_midi"] = full_midi.name
+        job.artifacts["multitrack_json"] = full_midi.with_suffix(".json").name
+        manager.save_job(job)
         return {
             "job": job,
-            "device": device,
-            "stems": stems_map,
-            "stem_urls": stem_urls,
+            "default_tab_tracks": dettato_transcriber.default_tab_tracks(tracks),
+            "info": info,
         }
 
-    @app.post("/api/jobs/{job_id}/transcribe")
-    def transcribe_job(job_id: str, params: TranscriptionParams):
-        try:
-            job = manager.get_job(job_id)
-        except FileNotFoundError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+    # ---------- parts ----------
 
-        job_dir = manager.get_job_dir(job_id)
-        requested_parts = [s.strip() for s in params.stem.split("+") if s.strip()]
-        stem_paths: list[Path] = []
-        for part in requested_parts:
-            if part not in job.stems:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Stem '{part}' não encontrada neste job.",
+    @app.post("/api/projects/{project_id}/parts")
+    def create_part(project_id: str, req: PartCreate):
+        job, _ = load(project_id)
+        try:
+            part = projects.new_part(job, req.name, req.start, req.end)
+        except PartError as exc:
+            raise part_error(exc) from exc
+        manager.save_job(job)
+        return {"job": job, "part": part}
+
+    @app.patch("/api/projects/{project_id}/parts/{part_id}")
+    def update_part(project_id: str, part_id: str, req: PartUpdate):
+        job, job_dir = load(project_id)
+        try:
+            part = projects.find_part(job, part_id)
+            if req.name is not None:
+                part.name = req.name.strip()
+            if req.start is not None or req.end is not None:
+                start, end = projects.check_range(
+                    job,
+                    part.start if req.start is None else req.start,
+                    part.end if req.end is None else req.end,
                 )
-            stem_paths.append(job_dir / job.stems[part])
-
-        if not stem_paths:
-            raise HTTPException(status_code=400, detail="Nenhuma stem selecionada.")
-
-        cleaned_wav = job_dir / "guitar_preprocessed.wav"
-        prepare_clean_audio(
-            stem_paths=stem_paths,
-            output_path=cleaned_wav,
-            bandpass_enabled=params.bandpass_enabled,
-            lowcut_hz=params.lowcut_hz,
-            highcut_hz=params.highcut_hz,
-            noise_gate_db=params.noise_gate_db,
-        )
-
-        midi_path = job_dir / "guitar_clean.mid"
-        notes, stats = transcribe_audio_to_midi(cleaned_wav, midi_path, params)
-        if not notes:
-            raise HTTPException(
-                status_code=422,
-                detail="Nenhuma nota detectada no MIDI com os filtros atuais. Reduza o Onset Threshold ou verifique se a stem selecionada contém áudio de guitarra.",
-            )
-
-        job.selected_stem = params.stem
-        job.transcription_params = params
-        job.artifacts["midi"] = midi_path.name
-        job.artifacts["preprocessed_wav"] = cleaned_wav.name
-        job.stats.update(stats)
+                if (start, end) != (part.start, part.end):
+                    part.start, part.end = start, end
+                    projects.clear_outputs(job_dir, part)  # the old tab no longer matches the excerpt
+                    job.parts.sort(key=lambda p: (p.start, p.created_at))
+        except PartError as exc:
+            raise part_error(exc) from exc
         manager.save_job(job)
+        return {"job": job, "part": part}
 
-        return {
-            "job": job,
-            "stats": stats,
-            "midi_url": f"/api/jobs/{job_id}/files/{midi_path.name}",
-            "preprocessed_audio_url": f"/api/jobs/{job_id}/files/{cleaned_wav.name}",
-        }
-
-    @app.post("/api/jobs/{job_id}/tab")
-    def generate_tab(job_id: str, params: TabParams):
+    @app.delete("/api/projects/{project_id}/parts/{part_id}")
+    def delete_part(project_id: str, part_id: str):
+        job, job_dir = load(project_id)
         try:
-            job = manager.get_job(job_id)
-        except FileNotFoundError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-        job_dir = manager.get_job_dir(job_id)
-        midi_name = job.artifacts.get("midi", "guitar_clean.mid")
-        midi_path = job_dir / midi_name
-        if not midi_path.exists():
-            raise HTTPException(
-                status_code=400,
-                detail="Arquivo MIDI ainda não foi gerado para este job. Execute a transcrição primeiro.",
-            )
-
-        notes = midi_file_to_notes(midi_path)
-        if not notes:
-            raise HTTPException(
-                status_code=422, detail="O arquivo MIDI não possui notas válidas."
-            )
-
-        slices, tab_stats = optimize_fretboard(notes, params)
-        title = Path(job.original_filename).stem
-
-        xml_path = export_musicxml(slices, params, job_dir / "tab.musicxml", title=title)
-        gp5_path = export_gp5(slices, params, job_dir / "tab.gp5", title=title)
-        txt_path = export_ascii_tab(slices, params, job_dir / "tab.txt", title=title)
-
-        job.tab_params = params
-        job.artifacts["musicxml"] = xml_path.name
-        job.artifacts["gp5"] = gp5_path.name
-        job.artifacts["txt"] = txt_path.name
-        job.stats.update(tab_stats)
+            part = projects.find_part(job, part_id)
+        except PartError as exc:
+            raise part_error(exc) from exc
+        projects.clear_outputs(job_dir, part)
+        job.parts.remove(part)
         manager.save_job(job)
+        return {"job": job}
 
-        return {
-            "job": job,
-            "stats": job.stats,
-            "artifacts": {
-                "musicxml": f"/api/jobs/{job_id}/files/{xml_path.name}",
-                "gp5": f"/api/jobs/{job_id}/files/{gp5_path.name}",
-                "txt": f"/api/jobs/{job_id}/files/{txt_path.name}",
-                "midi": f"/api/jobs/{job_id}/files/{midi_path.name}",
-            },
-            "ascii_preview": txt_path.read_text(encoding="utf-8"),
-        }
+    @app.post("/api/projects/{project_id}/parts/{part_id}/generate")
+    def generate_part(project_id: str, part_id: str, req: PartGenerate):
+        """Transcribe the excerpt (slicing the project's analysis) and build its tab."""
+        job, job_dir = load(project_id)
+        try:
+            part = projects.find_part(job, part_id)
+            ascii_tab = projects.generate_part(job, job_dir, part, req.transcription, req.tab)
+        except PartError as exc:
+            manager.save_job(job)  # outputs may have been cleared
+            raise part_error(exc) from exc
+        manager.save_job(job)
+        return {"job": job, "part": part, "ascii_preview": ascii_tab}
 
-    @app.get("/api/jobs/{job_id}/files/{filename}")
-    def get_job_file(job_id: str, filename: str):
-        safe_name = re.sub(r"[^A-Za-z0-9._-]", "", Path(filename).name)
-        job_dir = manager.get_job_dir(job_id)
-        file_path = job_dir / safe_name
-        if not file_path.exists():
-            raise HTTPException(status_code=404, detail="Arquivo não encontrado.")
-        return FileResponse(path=str(file_path), filename=safe_name)
+    @app.get("/api/projects/{project_id}/parts/{part_id}/files/{filename}")
+    def get_part_file(project_id: str, part_id: str, filename: str):
+        _, job_dir = load(project_id)
+        return safe_file(projects.part_dir(job_dir, part_id), filename)
 
     @app.get("/", response_class=HTMLResponse)
     def index_page():
