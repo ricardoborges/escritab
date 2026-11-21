@@ -66,7 +66,6 @@ const els = {
   loopToggle: $("loopToggle"),
   selClearBtn: $("selClearBtn"),
   projRateVal: $("projRateVal"),
-  projZoom: $("projZoom"),
   projSource: $("projSource"),
   snapCheck: $("snapCheck"),
   draftPanel: $("draftPanel"),
@@ -98,6 +97,8 @@ const els = {
   partStopBtn: $("partStopBtn"),
   partTime: $("partTime"),
   partRate: $("partRate"),
+  partLoopCheck: $("partLoopCheck"),
+  partLoopToggle: $("partLoopToggle"),
   partRateVal: $("partRateVal"),
   partSource: $("partSource"),
   partStartInput: $("partStartInput"),
@@ -463,7 +464,7 @@ function fillSourceSelect(select, value) {
   select.disabled = audioSources().length < 2;
 }
 
-async function createWave(container, stem) {
+async function createWave(container, stem, extra = {}) {
   const peaks = await loadPeaks();
   container.innerHTML = "";
   const ws = WaveSurfer.create({
@@ -480,19 +481,55 @@ async function createWave(container, stem) {
     url: sourceUrl(stem),
     peaks: [peaks.peaks],
     duration: peaks.duration,
+    ...extra,
   });
   const regions = ws.registerPlugin(WaveSurfer.Regions.create());
   const w = { ws, regions, loop: null, draft: null, stem };
   ws.on("timeupdate", (t) => {
-    if (w.loop && t >= w.loop.end) ws.setTime(w.loop.start);
+    // wrap only when crossing the end from inside the loop: a click after the end plays on from there
+    const prev = w.lastT;
+    w.lastT = t;
+    if (w.loop && t >= w.loop.end && prev !== undefined && prev < w.loop.end && prev >= w.loop.start - 0.3) {
+      ws.setTime(w.loop.start);
+    }
     if (w.onTime) w.onTime(t);
   });
+  // Precise click-to-seek, done here instead of trusting WaveSurfer's own: with zoom + drag
+  // selection its click could be swallowed. A click = pointer moved < 4 px (a drag draws a part).
+  // Region clicks stop propagation inside the shadow DOM and seek themselves.
+  let down = null;
+  const { signal } = (w.listeners = new AbortController());  // removed with the wave (destroyWave)
+  container.addEventListener("pointerdown", (e) => {
+    down = { x: e.clientX, y: e.clientY };
+  }, { capture: true, signal });
+  container.addEventListener("click", (e) => {
+    if (!down || Math.abs(e.clientX - down.x) > 4 || Math.abs(e.clientY - down.y) > 4) return;
+    const rect = ws.getWrapper().getBoundingClientRect();
+    if (e.clientY < rect.top || e.clientY > rect.bottom) return;  // the horizontal scrollbar
+    const t = clickTime(w, e);
+    ws.setTime(t);
+    if (w.onInteraction) w.onInteraction(t);
+  }, { signal });
   // a click outside the looped excerpt ends the loop
   ws.on("interaction", (t) => {
     if (w.onInteraction) w.onInteraction(t);  // project view: explicit selection + loop toggle
     else if (w.loop && (t < w.loop.start || t > w.loop.end)) w.loop = null;
   });
   return w;
+}
+
+/** Song time under a mouse event on the waveform.
+ *
+ * Measured on the scroll container: with zoom the drawing overflows it, and the wrapper's own box
+ * can stay as wide as the visible area, so its width is not the song's width. */
+function clickTime(w, e) {
+  const wrap = w.ws.getWrapper();
+  const scroller = (wrap && wrap.parentElement) || wrap;
+  const dur = w.ws.getDuration() || (state.peaks && state.peaks.duration) || 0;
+  const total = Math.max(scroller.scrollWidth, wrap.scrollWidth);
+  if (!total || !dur) return w.ws.getCurrentTime();
+  const x = e.clientX - scroller.getBoundingClientRect().left + scroller.scrollLeft;
+  return Math.min(dur, Math.max(0, (x / total) * dur));
 }
 
 /** Run fn once the waveform knows the duration (regions created before it collapse to 0). */
@@ -503,6 +540,7 @@ function whenReady(w, fn) {
 
 function destroyWave(w) {
   if (!w) return;
+  if (w.listeners) w.listeners.abort();
   try {
     w.ws.destroy();
   } catch {
@@ -527,6 +565,20 @@ function playLoop(w, start, end) {
   w.ws.play();
 }
 
+/** "compasso.tempo" (4/4 assumed) from the detected beats; "–" before the first beat. */
+function barBeat(t) {
+  const beats = state.project.beats || [];
+  let lo = 0;
+  let hi = beats.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (beats[mid] <= t + 0.02) lo = mid + 1;
+    else hi = mid;
+  }
+  if (!lo) return "–";
+  return `${Math.floor((lo - 1) / 4) + 1}.${((lo - 1) % 4) + 1}`;
+}
+
 /** Nearest beat when "snap" is on (the tab then starts on a beat, not in the middle of one). */
 function snapTime(t) {
   const beats = state.project.beats || [];
@@ -544,6 +596,7 @@ function snapTime(t) {
 async function renderProjectView() {
   const p = state.project;
   hide(els.projectStatus);
+  restoreTab();
   els.projNameInput.value = p.name;
   els.projBpmInput.value = p.detected_bpm;
   els.projMeta.textContent = `${fmtClock(p.duration, 0)} · ${p.original_filename}`;
@@ -551,24 +604,38 @@ async function renderProjectView() {
   renderPartList();
   fillSourceSelect(els.projSource, "");
   hide(els.draftPanel);
-  els.projZoom.value = "0";
   setProjRate(100);
   sel.cur = null;
   els.loopCheck.checked = false;
   renderSelectionBar();
 
-  projWave = await createWave(els.projWave, "");
+  projWave = await createWave(els.projWave, "", { hideScrollbar: true });
   const w = projWave;
   w.onTime = (t) => {
-    els.projTime.textContent = `${fmtClock(t)} / ${fmtClock(p.duration)}`;
-    updateNowChord(t);
-    syncChordLane();
+    els.projTime.textContent = fmtClock(t);
+    $("projBarBeat").textContent = barBeat(t);
+    updateNowChord(t, false, CU.project);
+    syncChordLane(CU.project);
+    syncPartLane();
+    navPlayhead(t);
     updateSheet(t);
   };
+  $("projTimeTotal").textContent = fmtClock(p.duration);
+  $("projBpmLcd").textContent = p.detected_bpm ? String(Math.round(p.detected_bpm * 10) / 10) : "–";
   w.onTime(0);
-  w.ws.on("play", () => (els.projPlayBtn.innerHTML = $("sheetPlayBtn").innerHTML = "&#10074;&#10074; Pause"));
-  w.ws.on("pause", () => (els.projPlayBtn.innerHTML = $("sheetPlayBtn").innerHTML = "&#9654; Play"));
-  for (const ev of ["scroll", "zoom", "redraw", "redrawcomplete"]) w.ws.on(ev, syncChordLane);
+  const playing = (on) => {
+    els.projPlayBtn.classList.toggle("is-playing", on);
+    els.projPlayBtn.setAttribute("aria-label", on ? "Pause" : "Play");
+    $("sheetPlayBtn").innerHTML = on ? "&#10074;&#10074; Pause" : "&#9654; Play";
+  };
+  playing(false);
+  w.ws.on("play", () => playing(true));
+  w.ws.on("pause", () => playing(false));
+  for (const ev of ["scroll", "zoom", "redraw", "redrawcomplete"]) w.ws.on(ev, () => {
+    syncChordLane(CU.project);
+    syncPartLane();
+    navUpdate();
+  });
   w.ws.on("seeking", (t) => {
     updateNowChord(t);
     updateSheet(t);
@@ -582,7 +649,8 @@ async function renderProjectView() {
     if (projWave !== w) return;
     drawPartRegions();
     w.regions.enableDragSelection({ color: DRAFT_COLOR });
-    syncChordLane();
+    syncChordLane(CU.project);
+    navAttach(w);
   });
   loadHarmony();
   loadLyrics();
@@ -601,15 +669,16 @@ async function renderProjectView() {
       if (sel.cur && sel.cur.kind === "draft") setSelection(draftSelection());
     }
   });
-  // one click selects the part (cursor to its start); looping is the "Repetir trecho" toggle's job
+  // one click selects the part AND puts the cursor exactly where you clicked (like a DAW);
+  // looping is the "Repetir trecho" toggle's job
   w.regions.on("region-clicked", (region, e) => {
     e.stopPropagation();
     if (region === w.draft) setSelection(draftSelection());
     else if (region.id.startsWith("part-")) {
       const part = state.project.parts.find((x) => `part-${x.part_id}` === region.id);
-      if (part) setSelection(partSelection(part));
-    } else return;
-    w.ws.setTime(region.start);
+      if (part && !(sel.cur && sel.cur.partId === part.part_id)) setSelection(partSelection(part));
+    }
+    w.ws.setTime(clickTime(w, e));
   });
   w.regions.on("region-double-clicked", (region) => {
     if (region.id.startsWith("part-")) navigate(`#/p/${p.job_id}/part/${region.id.slice(5)}`);
@@ -631,8 +700,506 @@ function drawPartRegions() {
       resize: false,
     });
   }
-  styleSelection();
+  renderPartLane();
 }
+
+/** Clickable buttons for the parts, between the waveform and the chord lane, aligned with the song time. */
+function renderPartLane() {
+  const lane = $("partLane");
+  const inner = $("partLaneInner");
+  const parts = (state.project && state.project.parts) || [];
+  inner.innerHTML = "";
+  show(lane, parts.length > 0);
+  const dur = (state.peaks && state.peaks.duration) || state.project.duration || 1;
+  for (const part of parts) {
+    inner.append(el("button", {
+      type: "button",
+      class: "lane-part",
+      style: `left:${(part.start / dur) * 100}%;width:${((part.end - part.start) / dur) * 100}%;--part-color:${partColor(part)}`,
+      title: `${part.name} · ${fmtRange(part.start, part.end)}\nClique: seleciona e vai para o início · Dois cliques: abre a parte`,
+      dataset: { partId: part.part_id },
+      onclick: () => {
+        if (!(sel.cur && sel.cur.partId === part.part_id)) setSelection(partSelection(part));
+        if (projWave) projWave.ws.setTime(part.start);
+      },
+      ondblclick: () => navigate(`#/p/${state.project.job_id}/part/${part.part_id}`),
+    }, part.name));
+  }
+  styleSelection();
+  syncPartLane();
+  navRenderParts();
+}
+
+/** Follow the waveform's zoom and horizontal scroll (same as the chord lane). */
+function syncPartLane() {
+  const w = projWave;
+  const wrap = w && w.ws.getWrapper();
+  if (!wrap) return;
+  const inner = $("partLaneInner");
+  const scroller = wrap.parentElement;
+  inner.style.width = `${wrap.scrollWidth}px`;
+  inner.style.transform = `translateX(${-(scroller ? scroller.scrollLeft : 0)}px)`;
+}
+
+// ---------- DAW-style navigation: time ruler + overview scrollbar with zoom handles ----------
+//
+// Like Reaper's arrange view: the overview under the chords shows the whole song and a window
+// over the visible part. Drag the window to scroll, drag its edges to zoom, double-click for the
+// whole song. Ctrl/⌘ + wheel (or pinch) over the waveform zooms around the mouse; + / − / 0 / Z keys.
+
+const NAV_MAX_PX_PER_SEC = 1500;
+const NAV_MIN_SPAN = 0.4;  // seconds visible at maximum zoom
+const NAV_STEP = 1.5;      // zoom factor of one button press / key press
+const nav = { w: null, raf: 0, drag: null, follow: true, rulerW: 0 };
+const navEls = {
+  track: $("navTrack"),
+  canvas: $("navCanvas"),
+  canvasPlayed: $("navCanvasPlayed"),
+  played: $("navPlayed"),
+  head: $("navPlayhead"),
+  win: $("navWindow"),
+  parts: $("navParts"),
+  range: $("navRange"),
+  zoom: $("navZoomLabel"),
+  ruler: $("projRuler"),
+  sel: $("navSelBtn"),
+  follow: $("navFollowBtn"),
+};
+
+/** Scroll geometry of the waveform: total drawn width, visible width, px per second. */
+function navMetrics() {
+  const w = nav.w;
+  if (!w || w !== projWave || !w.ws.getDecodedData()) return null;
+  const wrap = w.ws.getWrapper();
+  const sc = wrap && wrap.parentElement;
+  const dur = w.ws.getDuration() || (state.peaks && state.peaks.duration) || 0;
+  if (!sc || !dur || !sc.clientWidth) return null;
+  const total = Math.max(sc.scrollWidth, wrap.scrollWidth, sc.clientWidth);
+  const pps = total / dur;
+  const a = sc.scrollLeft / pps;
+  return { sc, dur, total, view: sc.clientWidth, pps, fit: sc.clientWidth / dur, a, b: a + sc.clientWidth / pps };
+}
+
+function navSetScroll(m, px) {
+  m.sc.scrollLeft = Math.max(0, px);
+}
+
+/** Show exactly [a, b] (clamped to the song and to the zoom limits). */
+function navZoomTo(a, b) {
+  const m = navMetrics();
+  if (!m) return;
+  let span = Math.min(m.dur, Math.max(NAV_MIN_SPAN, b - a));
+  let pps = Math.min(NAV_MAX_PX_PER_SEC, m.view / span);
+  if (pps <= m.fit * 1.0005) {
+    nav.w.ws.zoom(0);
+    navSetScroll(m, 0);
+  } else {
+    span = m.view / pps;
+    const start = Math.min(Math.max(0, a), m.dur - span);
+    nav.w.ws.zoom(pps);
+    navSetScroll(m, start * pps);
+  }
+  navUpdate();
+}
+
+/** Zoom by factor keeping time t at the same place on screen (frac = its position, 0..1). */
+function navZoomAt(factor, t, frac) {
+  const m = navMetrics();
+  if (!m) return;
+  const span = (m.b - m.a) / factor;
+  if (t === undefined) {
+    t = (m.a + m.b) / 2;
+    frac = 0.5;
+  }
+  navZoomTo(t - frac * span, t - frac * span + span);
+}
+
+/** Zoom around the play cursor (kept where it is when visible, centred otherwise). */
+function navZoomStep(factor) {
+  const m = navMetrics();
+  if (!m) return;
+  const t = nav.w.ws.getCurrentTime();
+  const inside = t >= m.a && t <= m.b;
+  navZoomAt(factor, t, inside ? (t - m.a) / (m.b - m.a) : 0.5);
+}
+
+function navFit() {
+  const m = navMetrics();
+  if (m) navZoomTo(0, m.dur);
+}
+
+/** Zoom on the selected section with a little context on both sides. */
+function navZoomSelection() {
+  const s = sel.cur;
+  if (!s) return;
+  const pad = Math.max(0.3, (s.end - s.start) * 0.06);
+  navZoomTo(s.start - pad, s.end + pad);
+}
+
+function navPanTo(a) {
+  const m = navMetrics();
+  if (!m) return;
+  navSetScroll(m, Math.min(Math.max(0, a), m.dur - (m.b - m.a)) * m.pps);
+  navUpdate();
+}
+
+function navUpdate() {
+  if (nav.raf) return;
+  nav.raf = requestAnimationFrame(() => {
+    nav.raf = 0;
+    navDraw();
+  });
+}
+
+function navDraw() {
+  const m = navMetrics();
+  if (!m) return;
+  navEls.win.style.left = `${(m.a / m.dur) * 100}%`;
+  navEls.win.style.width = `${(Math.min(m.dur, m.b - m.a) / m.dur) * 100}%`;
+  navEls.win.classList.toggle("full", m.b - m.a >= m.dur - 0.01);
+  navEls.range.textContent = `${fmtClock(m.a)} – ${fmtClock(Math.min(m.dur, m.b))}`;
+  const z = m.pps / m.fit;
+  navEls.zoom.textContent = `${z < 10 ? z.toFixed(1) : Math.round(z)}×`;
+  navEls.sel.disabled = !sel.cur;
+  navDrawRuler(m);
+}
+
+function navPlayhead(t) {
+  const m = navMetrics();
+  if (!m) return;
+  const pct = `${(Math.min(t, m.dur) / m.dur) * 100}%`;
+  navEls.head.style.left = pct;
+  navEls.played.style.width = pct;
+  navUpdate();  // the ruler's cursor mark
+}
+
+/** Size a canvas to its CSS box in device pixels; returns the 2D context (or null when hidden). */
+function fitCanvas(canvas, width, height) {
+  const dpr = window.devicePixelRatio || 1;
+  if (!width || !height) return null;
+  if (canvas.width !== Math.round(width * dpr) || canvas.height !== Math.round(height * dpr)) {
+    canvas.width = Math.round(width * dpr);
+    canvas.height = Math.round(height * dpr);
+  }
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+  return ctx;
+}
+
+/** Whole-song mini waveform: drawn twice, the second copy (progress colour) clipped by the played width. */
+function navDrawOverview() {
+  const peaks = state.peaks && state.peaks.peaks;
+  const width = navEls.track.clientWidth;
+  const height = navEls.track.clientHeight;
+  if (!peaks || !peaks.length) return;
+  navEls.canvasPlayed.style.width = `${width}px`;
+  for (const [canvas, color] of [[navEls.canvas, "#3b4a63"], [navEls.canvasPlayed, "#5b8def"]]) {
+    const ctx = fitCanvas(canvas, width, height);
+    if (!ctx) return;
+    ctx.fillStyle = color;
+    const bar = 2;
+    const mid = height / 2;
+    let max = 0;
+    for (const p of peaks) max = Math.max(max, Math.abs(p));
+    max = max || 1;
+    for (let x = 0; x < width; x += bar + 1) {
+      const i0 = Math.floor((x / width) * peaks.length);
+      const i1 = Math.max(i0 + 1, Math.floor(((x + bar) / width) * peaks.length));
+      let v = 0;
+      for (let i = i0; i < i1 && i < peaks.length; i++) v = Math.max(v, Math.abs(peaks[i]));
+      const h = Math.max(1, (v / max) * (height - 6));
+      ctx.fillRect(x, mid - h / 2, bar, h);
+    }
+  }
+}
+
+/** Coloured bands of the marked parts over the overview. */
+function navRenderParts() {
+  navEls.parts.innerHTML = "";
+  const parts = (state.project && state.project.parts) || [];
+  const dur = (state.peaks && state.peaks.duration) || (state.project && state.project.duration) || 1;
+  for (const part of parts) {
+    navEls.parts.append(el("div", {
+      class: "nav-part",
+      style: `left:${(part.start / dur) * 100}%;width:${((part.end - part.start) / dur) * 100}%;--part-color:${partColor(part)}`,
+    }));
+  }
+}
+
+const RULER_STEPS = [0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300];
+
+function rulerLabel(t, step) {
+  const m = Math.floor(t / 60);
+  const s = t - m * 60;
+  const dec = step < 1 ? 1 : 0;
+  return `${m}:${s.toFixed(dec).padStart(dec ? 4 : 2, "0")}`;
+}
+
+/** Time ruler over the visible part of the waveform: labelled ticks that adapt to the zoom + beat ticks. */
+function navDrawRuler(m) {
+  const canvas = navEls.ruler;
+  const width = canvas.clientWidth;
+  const height = canvas.clientHeight;
+  const ctx = fitCanvas(canvas, width, height);
+  if (!ctx) return;
+  // the wave's scroll area may be narrower than the ruler (border/padding): map onto it
+  const waveRect = m.sc.getBoundingClientRect();
+  const off = waveRect.left - (canvas.getBoundingClientRect().left + canvas.clientLeft);
+  const x = (t) => off + (t - m.a) * m.pps;
+  const step = RULER_STEPS.find((s) => s * m.pps >= 70) || 600;
+  const minor = step / ({ 0.2: 4, 2: 4, 15: 3, 30: 3, 60: 4, 120: 4, 300: 5 }[step] || 5);
+
+  // beats (from the analysis), when there is room for them
+  const beats = (state.project && state.project.beats) || [];
+  if (beats.length > 1 && ((beats[beats.length - 1] - beats[0]) / (beats.length - 1)) * m.pps >= 7) {
+    ctx.fillStyle = "rgba(91, 141, 239, 0.45)";
+    for (const b of beats) {
+      if (b < m.a - 1 || b > m.b + 1) continue;
+      ctx.fillRect(Math.round(x(b)), height - 5, 1, 5);
+    }
+  }
+  ctx.fillStyle = "rgba(139, 148, 158, 0.55)";
+  for (let t = Math.floor(m.a / minor) * minor; t <= m.b + minor; t += minor) {
+    if (t < 0) continue;
+    ctx.fillRect(Math.round(x(t)), height - 4, 1, 4);
+  }
+  ctx.font = "600 10px ui-monospace, SFMono-Regular, Consolas, monospace";
+  ctx.textBaseline = "top";
+  for (let t = Math.floor(m.a / step) * step; t <= m.b + step; t += step) {
+    if (t < -1e-6 || t > m.dur + 1e-6) continue;
+    const px = Math.round(x(t));
+    ctx.fillStyle = "rgba(139, 148, 158, 0.9)";
+    ctx.fillRect(px, height - 10, 1, 10);
+    ctx.fillStyle = "#c9d1d9";
+    ctx.fillText(rulerLabel(t + 1e-6, step), px + 4, 4);
+  }
+  // play cursor
+  const t = nav.w.ws.getCurrentTime();
+  if (t >= m.a && t <= m.b) {
+    const px = x(t);
+    ctx.fillStyle = "#f59e0b";
+    ctx.beginPath();
+    ctx.moveTo(px - 5, height - 7);
+    ctx.lineTo(px + 5, height - 7);
+    ctx.lineTo(px, height);
+    ctx.fill();
+  }
+}
+
+/** Song time at a pointer x over the overview. */
+function navTimeAt(clientX) {
+  const m = navMetrics();
+  const r = navEls.track.getBoundingClientRect();
+  return m ? Math.min(m.dur, Math.max(0, ((clientX - r.left) / r.width) * m.dur)) : 0;
+}
+
+/** While dragging, the view must not jump to the play cursor. */
+function navHoldFollow(hold) {
+  // the renderer shares this options object; setOptions() would re-render the whole wave
+  if (nav.w) nav.w.ws.options.autoScroll = nav.follow && !hold;
+}
+
+function navAttach(w) {
+  nav.w = w;
+  navHoldFollow(false);
+  navDrawOverview();
+  navRenderParts();
+  navPlayhead(w.ws.getCurrentTime());
+  navUpdate();
+}
+
+// --- overview interactions ---
+navEls.track.addEventListener("pointerdown", (e) => {
+  const m = navMetrics();
+  if (!m || e.button !== 0) return;
+  e.preventDefault();
+  navEls.track.setPointerCapture(e.pointerId);
+  const edge = e.target.closest(".nav-handle");
+  const t = navTimeAt(e.clientX);
+  if (edge) {
+    nav.drag = { kind: "resize", edge: edge.dataset.edge, a: m.a, b: Math.min(m.dur, m.b) };
+    navEls.track.classList.add("resizing");
+  } else {
+    // outside the window: jump there (centred), then keep dragging as a pan
+    if (!e.target.closest(".nav-window")) navPanTo(t - (m.b - m.a) / 2);
+    const m2 = navMetrics();
+    nav.drag = { kind: "pan", t0: t, a0: m2.a };
+    navEls.track.classList.add("dragging");
+  }
+  navHoldFollow(true);
+});
+navEls.track.addEventListener("pointermove", (e) => {
+  const d = nav.drag;
+  if (!d) return;
+  const t = navTimeAt(e.clientX);
+  if (d.kind === "pan") navPanTo(d.a0 + (t - d.t0));
+  else if (d.edge === "l") navZoomTo(Math.min(t, d.b - NAV_MIN_SPAN), d.b);
+  else navZoomTo(d.a, Math.max(t, d.a + NAV_MIN_SPAN));
+});
+function navEndDrag() {
+  if (!nav.drag) return;
+  nav.drag = null;
+  navEls.track.classList.remove("dragging", "resizing");
+  navHoldFollow(false);
+}
+navEls.track.addEventListener("pointerup", navEndDrag);
+navEls.track.addEventListener("pointercancel", navEndDrag);
+navEls.track.addEventListener("dblclick", (e) => {
+  const m = navMetrics();
+  if (!m) return;
+  // on the window: whole song; elsewhere: zoom in there
+  if (e.target.closest(".nav-window") && m.b - m.a < m.dur - 0.01) navFit();
+  else navZoomAt(4, navTimeAt(e.clientX), 0.5);
+});
+
+function wheelDelta(e) {
+  return e.deltaMode === 1 ? e.deltaY * 40 : e.deltaMode === 2 ? e.deltaY * 800 : e.deltaY;
+}
+navEls.track.addEventListener("wheel", (e) => {
+  const m = navMetrics();
+  if (!m) return;
+  e.preventDefault();
+  if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+    navPanTo(m.a + (e.deltaX / navEls.track.clientWidth) * m.dur);
+    return;
+  }
+  const t = navTimeAt(e.clientX);
+  const inside = t >= m.a && t <= m.b;
+  navZoomAt(Math.exp(-wheelDelta(e) * 0.002), inside ? t : undefined, inside ? (t - m.a) / (m.b - m.a) : undefined);
+}, { passive: false });
+
+// Ctrl/⌘ + wheel (trackpad pinch too) over the waveform: zoom around the mouse
+els.projWave.addEventListener("wheel", (e) => {
+  if (!(e.ctrlKey || e.metaKey)) return;
+  const m = navMetrics();
+  if (!m) return;
+  e.preventDefault();
+  const t = clickTime(nav.w, e);
+  const frac = (e.clientX - m.sc.getBoundingClientRect().left) / m.view;
+  // a trackpad pinch arrives as ctrl + small deltas: needs a stronger factor than a mouse wheel notch
+  const pinch = e.deltaMode === 0 && Math.abs(e.deltaY) < 10;
+  navZoomAt(Math.exp(-wheelDelta(e) * (pinch ? 0.01 : 0.002)), t, frac);
+}, { passive: false });
+
+// --- ruler ---
+navEls.ruler.addEventListener("click", (e) => {
+  const m = navMetrics();
+  if (!m) return;
+  const t = m.a + (e.clientX - m.sc.getBoundingClientRect().left) / m.pps;
+  nav.w.ws.setTime(Math.min(m.dur, Math.max(0, t)));
+  if (nav.w.onInteraction) nav.w.onInteraction(t);
+});
+navEls.ruler.addEventListener("wheel", (e) => {
+  const m = navMetrics();
+  if (!m) return;
+  e.preventDefault();
+  const frac = (e.clientX - m.sc.getBoundingClientRect().left) / m.view;
+  navZoomAt(Math.exp(-wheelDelta(e) * 0.002), m.a + frac * (m.b - m.a), frac);
+}, { passive: false });
+
+// --- buttons + keys ---
+$("navInBtn").addEventListener("click", () => navZoomStep(NAV_STEP));
+$("navOutBtn").addEventListener("click", () => navZoomStep(1 / NAV_STEP));
+$("navFitBtn").addEventListener("click", navFit);
+navEls.sel.addEventListener("click", navZoomSelection);
+navEls.follow.addEventListener("click", () => {
+  nav.follow = !nav.follow;
+  navEls.follow.classList.toggle("is-on", nav.follow);
+  navEls.follow.setAttribute("aria-pressed", String(nav.follow));
+  navHoldFollow(false);
+});
+document.addEventListener("keydown", (e) => {
+  if (state.view !== "project" || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.target.closest("input, textarea, select, [contenteditable]")) return;
+  const k = e.key;
+  if (k === "+" || k === "=") navZoomStep(NAV_STEP);
+  else if (k === "-" || k === "_") navZoomStep(1 / NAV_STEP);
+  else if (k === "0") navFit();
+  else if (k === "z" || k === "Z") navZoomSelection();
+  else return;
+  e.preventDefault();
+});
+
+new ResizeObserver(() => {
+  if (!navMetrics()) return;
+  navDrawOverview();
+  navUpdate();
+}).observe(navEls.track);
+
+// ---------- project: tabs (Partes / Letra / Harmonia / Análise) + sticky player ----------
+
+const TABS = ["parts", "lyrics", "harmony", "analysis"];
+const tabsEl = $("projTabs");
+const playerCard = $("playerCard");
+
+function tabStorageKey() {
+  return `escritab.tab.${state.project ? state.project.job_id : ""}`;
+}
+
+/** Show one tab panel; remembered per project (localStorage is a convenience: may be unavailable). */
+function openTab(name, remember = true) {
+  if (!TABS.includes(name)) name = "parts";
+  for (const b of tabsEl.querySelectorAll(".tab")) {
+    const on = b.dataset.tab === name;
+    b.classList.toggle("active", on);
+    b.setAttribute("aria-selected", String(on));
+    b.tabIndex = on ? 0 : -1;
+  }
+  for (const panel of document.querySelectorAll("[data-tab-panel]")) show(panel, panel.dataset.tabPanel === name);
+  if (remember) {
+    try {
+      localStorage.setItem(tabStorageKey(), name);
+    } catch {
+      /* private mode / blocked storage */
+    }
+  }
+}
+
+function restoreTab() {
+  let name = null;
+  try {
+    name = localStorage.getItem(tabStorageKey());
+  } catch {
+    /* ignore */
+  }
+  openTab(name || "parts", false);
+}
+
+/** After switching, keep the tab bar just under the sticky player instead of deep inside the old panel. */
+function revealTabs() {
+  if (tabsEl.getBoundingClientRect().top < 0) tabsEl.scrollIntoView({ block: "start" });
+}
+
+tabsEl.addEventListener("click", (e) => {
+  const b = e.target.closest(".tab");
+  if (!b) return;
+  openTab(b.dataset.tab);
+  revealTabs();
+});
+tabsEl.addEventListener("keydown", (e) => {
+  const order = [...tabsEl.querySelectorAll(".tab")];
+  const i = order.indexOf(document.activeElement);
+  if (i < 0) return;
+  let j = null;
+  if (e.key === "ArrowRight") j = (i + 1) % order.length;
+  else if (e.key === "ArrowLeft") j = (i - 1 + order.length) % order.length;
+  else if (e.key === "Home") j = 0;
+  else if (e.key === "End") j = order.length - 1;
+  if (j === null) return;
+  e.preventDefault();
+  order[j].focus();
+  openTab(order[j].dataset.tab);
+});
+
+// height of the sticky player, so the tab bar scrolls to just below it
+new ResizeObserver(() => {
+  document.documentElement.style.setProperty("--player-h", `${playerCard.offsetHeight}px`);
+}).observe(playerCard);
+// shadow under the player only while it is stuck to the top
+new IntersectionObserver(([entry]) => {
+  playerCard.classList.toggle("is-stuck", !entry.isIntersecting && entry.boundingClientRect.top < 0);
+}).observe($("playerSentinel"));
 
 // ---------- project: selected section + loop ----------
 
@@ -654,6 +1221,7 @@ function setSelection(s) {
   applyLoop();
   styleSelection();
   renderSelectionBar();
+  navUpdate();
 }
 
 /** The waveform loops only when a section is selected AND "Repetir trecho" is on. */
@@ -699,7 +1267,7 @@ function styleSelection() {
     });
     if (region && region.element) region.element.style.boxShadow = `inset 0 0 0 2px ${RANGE_COLOR}`;
   }
-  for (const row of els.partList.querySelectorAll(".part-row")) {
+  for (const row of [...els.partList.querySelectorAll(".part-row"), ...$("partLaneInner").children]) {
     row.classList.toggle("selected", !!s && s.kind === "part" && row.dataset.partId === s.partId);
   }
 }
@@ -715,6 +1283,7 @@ function renderSelectionBar() {
     els.selLabel.append(el("strong", {}, "Nenhum trecho selecionado"),
       el("span", { class: "muted" }, " · o Play toca a música inteira. Clique numa parte ou arraste sobre a onda para selecionar."));
   }
+  $("projFromStartBtn").title = s ? "Tocar do começo do trecho selecionado (tecla Home)" : "Tocar do começo da música (tecla Home)";
   els.loopCheck.disabled = !s;
   els.loopToggle.classList.toggle("is-disabled", !s);
   els.loopToggle.classList.toggle("active", !!s && els.loopCheck.checked);
@@ -811,6 +1380,7 @@ function renderPartList() {
   const parts = state.project.parts;
   els.partList.innerHTML = "";
   show(els.partEmpty, parts.length === 0);
+  $("tabPartsCount").textContent = parts.length ? String(parts.length) : "";
   for (const part of parts) {
     const ready = !!part.artifacts.musicxml;
     const status = ready
@@ -850,14 +1420,13 @@ els.projPlayBtn.addEventListener("click", () => {
   }
   w.ws.play();
 });
+// DAW-style stop: the first press stops right there (Play continues from it); pressing it again
+// while stopped goes back to the start of the looped section, or of the song
 els.projStopBtn.addEventListener("click", () => {
   const w = projWave;
   if (!w) return;
-  w.ws.pause();
-  w.ws.setTime(w.loop ? w.loop.start : 0);
-});
-els.projZoom.addEventListener("input", () => {
-  if (projWave && projWave.ws.getDecodedData()) projWave.ws.zoom(Number(els.projZoom.value));
+  if (w.ws.isPlaying()) w.ws.pause();
+  else w.ws.setTime(w.loop ? w.loop.start : 0);
 });
 els.projSource.addEventListener("change", () => {
   if (!projWave) return;
@@ -873,6 +1442,7 @@ function setProjRate(pct) {
     slider.value = String(pct);
     label.textContent = `${pct}%`;
     label.classList.toggle("slowed", pct < 100);
+    slider.style.setProperty("--fill", `${((pct - Number(slider.min)) / (Number(slider.max) - Number(slider.min))) * 100}%`);
   }
   if (projWave) projWave.ws.setPlaybackRate(pct / 100, true);
 }
@@ -941,7 +1511,7 @@ function renderAnalysis() {
   if (stems.length) parts.push("stems prontas");
   els.analysisSummary.textContent = parts.length ? `· ${parts.join(" · ")}` : "· falta analisar";
   // open while there is nothing to transcribe from, so the next step is obvious
-  if (!tracks.length && !stems.length) els.analysisBox.open = true;
+  show($("tabAnalysisDot"), !tracks.length && !stems.length);
 
   show(els.mixerBox, tracks.length > 0);
   renderMixer();
@@ -981,7 +1551,7 @@ async function runMultitrack() {
   if (state.busy || !state.project) return;
   setBusy(true);
   els.multitrackBtn.disabled = true;
-  els.analysisBox.open = true;
+  openTab("analysis");
   banner(els.analysisStatus, onDevice(
     "Transcrevendo a música inteira com Dettato na GPU... você já pode marcar as partes enquanto isso.",
     "Transcrevendo a música inteira com Dettato na CPU... pode levar vários minutos. Você já pode marcar as partes."), "busy");
@@ -1006,7 +1576,7 @@ async function runSeparate(model) {
   if (state.busy || !state.project) return;
   setBusy(true);
   els.separateBtn.disabled = true;
-  els.analysisBox.open = true;
+  openTab("analysis");
   banner(els.analysisStatus, onDevice(
     "Separando as stems com Demucs na GPU... você já pode marcar as partes enquanto isso.",
     "Separando as stems com Demucs na CPU... pode levar vários minutos. Você já pode marcar as partes."), "busy");
@@ -1080,7 +1650,6 @@ async function loadHarmony() {
   const projectId = state.project.job_id;
   H.data = null;
   H.projectId = projectId;
-  H.nowIdx = -1;
   H.highlight = null;
   H.loaded = false;
   hide(hEls.status);
@@ -1106,8 +1675,7 @@ async function runHarmony() {
     const data = await postJson(`/api/projects/${projectId}/harmony`);
     if (H.projectId === projectId) {
       H.data = data.harmony;
-      H.nowIdx = -1;
-      H.highlight = null;
+          H.highlight = null;
       hide(hEls.status);
       renderHarmony();
       if (L.data && L.data.lyrics) loadLyrics();  // new chords for the sheet
@@ -1136,17 +1704,16 @@ function renderHarmony() {
   const h = H.data;
   if (h && !harmonyIsCurrent()) return;
   show(hEls.body, !!h);
-  show(hEls.lane, !!h);
-  show(hEls.live, !!h);
   // the hint waits for the GET, so it does not flash while the saved analysis loads
   show(hEls.liveHint, !h && H.loaded);
+  show($("tabHarmonyDot"), (!h && H.loaded) || (!!h && !!harmonyStaleReason(h)));
   hEls.meta.classList.remove("warn-text");
   hEls.btn.textContent = h ? "Analisar de novo" : "Analisar harmonia";
   if (!h) {
     hEls.meta.textContent = hasStems() || hasMultitrack()
       ? "Descobre o tom, o campo harmônico e os acordes da música."
-      : "Descobre o tom, o campo harmônico e os acordes. Fica mais preciso depois de separar as stems (em \"Análise da música\").";
-    hEls.laneInner.innerHTML = "";
+      : "Descobre o tom, o campo harmônico e os acordes. Fica mais preciso depois de separar as stems (na aba \"MIDI\").";
+    renderChordUIs();
     return;
   }
   const src = h.used_midi ? `${h.source} + MIDI Dettato` : h.source;
@@ -1158,14 +1725,12 @@ function renderHarmony() {
   renderLoops(h);
   renderOutside(h);
   renderHarmonyParts();
-  renderChordLane();
-  updateNowChord(projWave ? projWave.ws.getCurrentTime() : 0, true);
+  renderChordUIs();
 }
 
 function renderKey(h) {
   const k = h.key;
   hEls.keyName.textContent = k.name;
-  hEls.liveKey.textContent = k.name;
   const pct = Math.round(k.confidence * 100);
   hEls.keyConfBar.style.width = `${pct}%`;
   hEls.keyConf.textContent = `Confiança ${pct}%${pct < 50 && k.alternatives.length ? ` · também pode ser ${k.alternatives.join(" ou ")}` : ""}`;
@@ -1191,7 +1756,8 @@ function renderField(h) {
       onclick: () => {
         H.highlight = H.highlight === f.root ? null : f.root;
         renderField(h);
-        renderChordLane();
+        renderChordLane(CU.project);
+        renderChordLane(CU.part);
       },
     },
       el("span", { class: "field-numeral" }, f.numeral),
@@ -1281,9 +1847,48 @@ function renderHarmonyParts() {
   }
 }
 
-function renderChordLane() {
-  const h = H.data;
-  hEls.laneInner.innerHTML = "";
+/** Chord lane + live chord strip of one view; the song page and the part page each have one. */
+function chordUI(prefix, getWave) {
+  const id = (n) => $(prefix ? prefix + n[0].toUpperCase() + n.slice(1) : n);
+  return {
+    getWave,
+    nowIdx: -1,
+    lane: id("chordLane"),
+    laneInner: id("chordLaneInner"),
+    live: id("liveChord"),
+    liveKey: id("liveKey"),
+    liveChordName: id("liveChordName"),
+    liveNumeral: id("liveNumeral"),
+    liveFn: id("liveFn"),
+    liveProgress: id("liveProgress"),
+    liveInfo: id("liveInfo"),
+    liveNext: id("liveNext"),
+    liveNextNum: id("liveNextNum"),
+  };
+}
+const CU = {
+  project: chordUI("", () => projWave),
+  part: chordUI("part", () => partWave),
+};
+
+/** Lane, key and live strip of both views from the current harmony (or hide them). */
+function renderChordUIs() {
+  const h = harmonyIsCurrent() ? H.data : null;
+  for (const ctx of Object.values(CU)) {
+    show(ctx.lane, !!h);
+    show(ctx.live, !!h);
+    ctx.nowIdx = -1;
+    if (h) ctx.liveKey.textContent = h.key.name;
+    renderChordLane(ctx);
+    const w = ctx.getWave();
+    updateNowChord(w ? w.ws.getCurrentTime() : 0, true, ctx);
+  }
+  show($("partHarmonyHint"), !h && H.loaded);
+}
+
+function renderChordLane(ctx = CU.project) {
+  const h = harmonyIsCurrent() ? H.data : null;
+  ctx.laneInner.innerHTML = "";
   if (!h) return;
   const dur = (state.peaks && state.peaks.duration) || state.project.duration || 1;
   h.chords.forEach((c, i) => {
@@ -1291,26 +1896,30 @@ function renderChordLane() {
     const dim = H.highlight !== null && c.root !== H.highlight;
     const tip = [c.label, c.numeral, fn !== "X" ? FN_NAMES[fn] : "fora do campo", c.implied ? `representa ${c.implied}` : ""]
       .filter(Boolean).join(" · ") + (c.explain ? `\n${c.explain}` : "");
-    hEls.laneInner.append(el("button", {
+    ctx.laneInner.append(el("button", {
       type: "button",
-      class: `lane-chord fn-${fn}` + (dim ? " dim" : "") + (i === H.nowIdx ? " now" : ""),
+      class: `lane-chord fn-${fn}` + (dim ? " dim" : "") + (i === ctx.nowIdx ? " now" : ""),
       style: `left:${(c.start / dur) * 100}%;width:${((c.end - c.start) / dur) * 100}%`,
       title: tip,
       dataset: { idx: String(i) },
-      onclick: () => projWave && projWave.ws.setTime(c.start + 0.01),
+      onclick: () => {
+        const w = ctx.getWave();
+        if (w) w.ws.setTime(c.start + 0.01);
+      },
     }, c.label));
   });
-  syncChordLane();
+  syncChordLane(ctx);
 }
 
 /** Follow the waveform's zoom and horizontal scroll. */
-function syncChordLane() {
-  if (!projWave || !H.data) return;
-  const wrap = projWave.ws.getWrapper();
+function syncChordLane(ctx = CU.project) {
+  const w = ctx.getWave();
+  if (!w || !H.data) return;
+  const wrap = w.ws.getWrapper();
   const scroller = wrap && wrap.parentElement;
   if (!wrap) return;
-  hEls.laneInner.style.width = `${wrap.scrollWidth}px`;
-  hEls.laneInner.style.transform = `translateX(${-(scroller ? scroller.scrollLeft : 0)}px)`;
+  ctx.laneInner.style.width = `${wrap.scrollWidth}px`;
+  ctx.laneInner.style.transform = `translateX(${-(scroller ? scroller.scrollLeft : 0)}px)`;
 }
 
 function chordIndexAt(t) {
@@ -1327,46 +1936,46 @@ function chordIndexAt(t) {
 }
 
 /** Live strip under the waveform: chord now (grau, função), time left on it, next chord. */
-function updateNowChord(t, force = false) {
+function updateNowChord(t, force = false, ctx = CU.project) {
   if (!harmonyIsCurrent()) return;
   const chords = H.data.chords;
-  let idx = chordIndexAt(t);
+  const idx = chordIndexAt(t);
   // in a silence between chords, show what is coming
   const nextIdx = idx >= 0 ? idx + 1 : chords.findIndex((c) => c.start > t);
   const cur = idx >= 0 ? chords[idx] : null;
-  hEls.liveProgress.style.width = cur ? `${Math.min(100, ((t - cur.start) / (cur.end - cur.start)) * 100)}%` : "0%";
-  if (idx === H.nowIdx && !force) return;
+  ctx.liveProgress.style.width = cur ? `${Math.min(100, ((t - cur.start) / (cur.end - cur.start)) * 100)}%` : "0%";
+  if (idx === ctx.nowIdx && !force) return;
 
-  const old = hEls.laneInner.querySelector(".lane-chord.now");
+  const old = ctx.laneInner.querySelector(".lane-chord.now");
   if (old) old.classList.remove("now");
-  H.nowIdx = idx;
+  ctx.nowIdx = idx;
   const next = nextIdx >= 0 ? chords[nextIdx] : null;
-  hEls.liveNext.textContent = next ? next.label : "–";
-  hEls.liveNext.className = `live-next-name${next ? ` fn-${chordFunction(next)}` : ""}`;
-  hEls.liveNextNum.textContent = next ? next.numeral : "";
+  ctx.liveNext.textContent = next ? next.label : "–";
+  ctx.liveNext.className = `live-next-name${next ? ` fn-${chordFunction(next)}` : ""}`;
+  ctx.liveNextNum.textContent = next ? next.numeral : "";
   if (!cur) {
-    hEls.liveChordName.textContent = "–";
-    hEls.liveChordName.className = "live-chord-name";
-    hEls.liveNumeral.textContent = "";
-    hEls.liveFn.textContent = "";
-    hEls.liveInfo.textContent = t < 0.05 ? "Dê play para acompanhar os acordes." : "Sem acorde (pausa ou só bateria).";
-    hEls.live.className = "live-chord";
+    ctx.liveChordName.textContent = "–";
+    ctx.liveChordName.className = "live-chord-name";
+    ctx.liveNumeral.textContent = "";
+    ctx.liveFn.textContent = "";
+    ctx.liveInfo.textContent = force ? "Dê play para acompanhar os acordes." : "Sem acorde (pausa ou só bateria).";
+    ctx.live.className = "live-chord";
     return;
   }
-  const node = hEls.laneInner.querySelector(`[data-idx="${idx}"]`);
+  const node = ctx.laneInner.querySelector(`[data-idx="${idx}"]`);
   if (node) node.classList.add("now");
   const fn = chordFunction(cur);
-  hEls.live.className = `live-chord fn-${fn}`;
-  hEls.liveChordName.textContent = cur.label;
-  hEls.liveChordName.className = `live-chord-name fn-${fn}`;
-  hEls.liveNumeral.textContent = cur.numeral;
-  hEls.liveNumeral.className = `now-numeral fn-${fn}`;
-  hEls.liveFn.textContent = fn !== "X" ? FN_NAMES[fn] : "fora do campo";
+  ctx.live.className = `live-chord fn-${fn}`;
+  ctx.liveChordName.textContent = cur.label;
+  ctx.liveChordName.className = `live-chord-name fn-${fn}`;
+  ctx.liveNumeral.textContent = cur.numeral;
+  ctx.liveNumeral.className = `now-numeral fn-${fn}`;
+  ctx.liveFn.textContent = fn !== "X" ? FN_NAMES[fn] : "fora do campo";
   const info = [];
   if (cur.implied) info.push(`Power chord (sem terça): aqui representa o ${cur.implied}.`);
   if (cur.explain) info.push(cur.explain);
   else if (fn !== "X") info.push(H.data.field[cur.degree - 1].function_pt + ".");
-  hEls.liveInfo.textContent = info.join(" ");
+  ctx.liveInfo.textContent = info.join(" ");
 }
 
 // ---------- project: lyrics + chord sheet ----------
@@ -1375,8 +1984,6 @@ const L = {
   data: null,       // {lyrics, sheet, has_harmony}
   projectId: null,
   loaded: false,
-  rows: [],         // rendered rows: {start, end, node, words: [{start, node}]}
-  curRow: -1,
 };
 const lEls = {
   status: $("lyricsStatus"),
@@ -1409,7 +2016,7 @@ async function loadLyrics() {
   L.projectId = projectId;
   L.data = null;
   L.loaded = false;
-  L.curRow = -1;
+  L.editing = false;  // opening a project always shows the synced sheet, never a leftover edit
   hide(lEls.status);
   lEls.text.value = "";
   renderLyrics();
@@ -1446,7 +2053,6 @@ async function runLyrics(useText) {
       L.data = data;
       L.loaded = true;
       L.editing = false;
-      L.curRow = -1;
       hide(lEls.status);
       renderLyrics();
     }
@@ -1470,14 +2076,35 @@ lEls.cancelBtn.addEventListener("click", () => {
   renderLyrics();
 });
 lEls.playBtn.addEventListener("click", () => els.projPlayBtn.click());
-lEls.numerals.addEventListener("change", () => renderSheet());
-lEls.filter.addEventListener("change", () => renderSheet());
+
+/** Sheet options (speed, filter, numerals, follow) stay folded once the lyrics are synced. */
+function setSheetOpts(open, remember = true) {
+  show($("sheetOpts"), open);
+  const btn = $("sheetOptsBtn");
+  btn.setAttribute("aria-expanded", String(open));
+  btn.classList.toggle("is-open", open);
+  if (remember) {
+    try {
+      localStorage.setItem("escritab.sheetOpts", open ? "1" : "0");
+    } catch {
+      /* blocked storage */
+    }
+  }
+}
+$("sheetOptsBtn").addEventListener("click", () => setSheetOpts($("sheetOpts").classList.contains("hidden")));
+try {
+  setSheetOpts(localStorage.getItem("escritab.sheetOpts") === "1", false);
+} catch {
+  setSheetOpts(false, false);
+}
+lEls.numerals.addEventListener("change", () => renderSheet(SU.project));
+lEls.filter.addEventListener("change", () => renderSheet(SU.project));
 
 function lyricsHintText() {
   const p = state.project;
   const parts = [];
   if (!p.stems.vocals && !p.is_isolated_stem) {
-    parts.push("Sem a stem de vocais o Whisper ouve a música inteira e erra mais: separe as stems em \"Análise da música\" antes.");
+    parts.push("Sem a stem de vocais o Whisper ouve a música inteira e erra mais: separe as stems na aba \"MIDI\" antes.");
   }
   parts.push("Mantenha uma linha por verso; tags como [Verse] e [Chorus] viram títulos de seção.");
   parts.push(`Leva uns ${Math.max(1, Math.round((p.duration / 60) * 0.5))}–${Math.max(2, Math.round((p.duration / 60) * 0.6))} min com GPU. Na primeira vez o modelo é baixado (~1,5 GB).`);
@@ -1492,11 +2119,15 @@ function renderLyrics() {
   show(lEls.editor, L.loaded && editing);
   show(lEls.view, has && !L.editing);
   show(lEls.cancelBtn, has && L.editing);
+  // editing synced lyrics starts from them, not from an empty box
+  if (has && L.editing && !lEls.text.value.trim()) lEls.text.value = d.lyrics.text;
+  show($("lyricsIntro"), editing);  // the "how it works" line only while setting it up
   lEls.alignBtn.textContent = has ? "Alinhar de novo" : "Alinhar com a voz";
   lEls.hint.textContent = lyricsHintText();
   if (!has) {
-    L.rows = [];
+    SU.project.rows = [];
     lEls.sheet.innerHTML = "";
+    renderPartSheet();
     return;
   }
   const ly = d.lyrics;
@@ -1507,7 +2138,8 @@ function renderLyrics() {
     + `${ly.stats.lines} linhas · Whisper ${ly.model} (${ly.device === "cuda" ? "GPU" : "CPU"}) · ${ly.source}.`;
   show(lEls.noHarmony, !d.has_harmony);
   renderSheetFilter();
-  renderSheet();
+  renderSheet(SU.project);
+  renderPartSheet();
 }
 
 function renderSheetFilter() {
@@ -1530,22 +2162,71 @@ function sheetChordCols(chords, useNumerals) {
   });
 }
 
-function renderSheet() {
+/** A rendered chord sheet: the song page shows all of it (or one part), the part page its excerpt. */
+const SU = {
+  project: {
+    sheet: lEls.sheet, numerals: lEls.numerals, follow: lEls.follow, time: lEls.time,
+    getWave: () => projWave,
+    getRange: () => {
+      const part = lEls.filter.value && state.project.parts.find((x) => x.part_id === lEls.filter.value);
+      return part ? { start: part.start, end: part.end } : null;
+    },
+    rows: [], curRow: -1,
+  },
+  part: {
+    sheet: $("partSheet"), numerals: $("partSheetNumerals"), follow: $("partSheetFollow"), time: null,
+    getWave: () => partWave,
+    getRange: () => {
+      const w = partWave;
+      if (w && w.excerpt && Number.isFinite(w.excerpt.start)) return { start: w.excerpt.start, end: w.excerpt.end };
+      const part = currentPart();
+      return part ? { start: part.start, end: part.end } : null;
+    },
+    rows: [], curRow: -1,
+  },
+};
+SU.part.numerals.addEventListener("change", () => renderSheet(SU.part));
+
+/** The part page's sheet card: the excerpt, or a hint when there are no lyrics yet. */
+function renderPartSheet() {
+  const card = $("partLyricsCard");
+  const hint = $("partSheetHint");
+  if (state.view !== "part" || !lyricsIsCurrent() || !L.loaded) {
+    hide(card);
+    return;
+  }
+  show(card);
+  const has = !!(L.data && L.data.lyrics);
+  show(SU.part.sheet, has);
+  show(hint, !has || !L.data.has_harmony);
+  if (!has) {
+    hint.textContent = "Ainda não há letra nesta música. Cole a letra no card \"Letra e cifra\" da página da música para ver a cifra deste trecho aqui.";
+    SU.part.rows = [];
+    SU.part.sheet.innerHTML = "";
+    return;
+  }
+  hint.textContent = "Analise a harmonia na página da música para ver os acordes em cima da letra.";
+  renderSheet(SU.part);
+}
+
+function renderSheet(ctx = SU.project) {
   if (!L.data || !L.data.sheet) return;
-  const useNumerals = lEls.numerals.checked;
-  const partId = lEls.filter.value;
-  const part = partId ? state.project.parts.find((x) => x.part_id === partId) : null;
-  const inRange = (it) => !part || (it.end > part.start + 0.05 && it.start < part.end - 0.05);
-  lEls.sheet.innerHTML = "";
-  L.rows = [];
-  L.curRow = -1;
-  const seek = (t) => projWave && projWave.ws.setTime(Math.max(0, t));
+  const useNumerals = ctx.numerals.checked;
+  const range = ctx.getRange();
+  const inRange = (it) => !range || (it.end > range.start + 0.05 && it.start < range.end - 0.05);
+  ctx.sheet.innerHTML = "";
+  ctx.rows = [];
+  ctx.curRow = -1;
+  const seek = (t) => {
+    const w = ctx.getWave();
+    if (w) w.ws.setTime(Math.max(0, t));
+  };
   const items = L.data.sheet;
   items.forEach((it, i) => {
     if (it.kind === "section") {
       const nextRow = items.slice(i + 1).find((x) => x.kind !== "section");
-      if (part && !(nextRow && inRange(nextRow))) return;
-      lEls.sheet.append(el("div", { class: "sheet-section" }, it.name));
+      if (range && !(nextRow && inRange(nextRow))) return;
+      ctx.sheet.append(el("div", { class: "sheet-section" }, it.name));
       return;
     }
     if (!inRange(it)) return;
@@ -1560,8 +2241,8 @@ function renderSheet() {
           onclick: (e) => { e.stopPropagation(); seek(c.start); },
         }, useNumerals ? c.numeral : c.label));
       }
-      lEls.sheet.append(row);
-      L.rows.push({ start: it.start, end: it.end, node: row, words: [] });
+      ctx.sheet.append(row);
+      ctx.rows.push({ start: it.start, end: it.end, node: row, words: [] });
       return;
     }
     // lyric line: chords absolutely placed by character column over the words
@@ -1591,35 +2272,36 @@ function renderSheet() {
       title: `${fmtClock(it.start)} · clique para ir até aqui`,
       onclick: () => seek(it.start - 0.15),
     }, chordLine, textLine);
-    lEls.sheet.append(row);
-    L.rows.push({ start: it.start, end: it.end, node: row, words });
+    ctx.sheet.append(row);
+    ctx.rows.push({ start: it.start, end: it.end, node: row, words });
   });
-  if (!L.rows.length) lEls.sheet.append(el("p", { class: "muted" }, "Nada cantado nesta parte."));
-  updateSheet(projWave ? projWave.ws.getCurrentTime() : 0, true);
+  if (!ctx.rows.length) ctx.sheet.append(el("p", { class: "muted" }, "Nada cantado neste trecho."));
+  const w = ctx.getWave();
+  updateSheet(w ? w.ws.getCurrentTime() : 0, true, ctx);
 }
 
 /** Highlight the line (and the words already sung) under the playhead; keep it in view. */
-function updateSheet(t, force = false) {
-  if (!lyricsIsCurrent() || !L.rows.length) return;
-  lEls.time.textContent = fmtClock(t, 0);
+function updateSheet(t, force = false, ctx = SU.project) {
+  if (!lyricsIsCurrent() || !ctx.rows.length) return;
+  if (ctx.time) ctx.time.textContent = fmtClock(t, 0);
   let idx = -1;
-  for (let i = 0; i < L.rows.length; i++) {
-    if (L.rows[i].start <= t + 0.05) idx = i;
+  for (let i = 0; i < ctx.rows.length; i++) {
+    if (ctx.rows[i].start <= t + 0.05) idx = i;
     else break;
   }
-  if (idx >= 0 && t > L.rows[idx].end + 1.0) idx = -1;  // between lines: nothing lit
-  if (idx !== L.curRow || force) {
-    if (L.curRow >= 0 && L.rows[L.curRow]) {
-      const old = L.rows[L.curRow];
+  if (idx >= 0 && t > ctx.rows[idx].end + 1.0) idx = -1;  // between lines: nothing lit
+  if (idx !== ctx.curRow || force) {
+    if (ctx.curRow >= 0 && ctx.rows[ctx.curRow]) {
+      const old = ctx.rows[ctx.curRow];
       old.node.classList.remove("current");
       old.words.forEach((w) => w.node.classList.remove("sung"));
     }
-    L.curRow = idx;
+    ctx.curRow = idx;
     if (idx >= 0) {
-      const row = L.rows[idx].node;
+      const row = ctx.rows[idx].node;
       row.classList.add("current");
-      if (lEls.follow.checked) {
-        const box = lEls.sheet;
+      if (ctx.follow.checked) {
+        const box = ctx.sheet;
         const top = row.offsetTop - box.clientHeight * 0.3;
         if (row.offsetTop < box.scrollTop || row.offsetTop + row.offsetHeight > box.scrollTop + box.clientHeight * 0.8) {
           box.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
@@ -1627,7 +2309,7 @@ function updateSheet(t, force = false) {
       }
     }
   }
-  if (idx >= 0) for (const w of L.rows[idx].words) w.node.classList.toggle("sung", w.start <= t);
+  if (idx >= 0) for (const w of ctx.rows[idx].words) w.node.classList.toggle("sung", w.start <= t);
 }
 
 // ---------- view: part ----------
@@ -1647,19 +2329,37 @@ async function renderPartView() {
   partWave = await createWave(els.partWave, els.partSource.value);
   const w = partWave;
   w.excerpt = { start: part.start, end: part.end };   // replaced by the region once the wave is ready
-  w.loop = { start: part.start, end: part.end };
   w.onTime = (t) => {
     const r = w.excerpt;
     els.partTime.textContent = `${fmtClock(Math.max(0, t - r.start))} / ${fmtClock(r.end - r.start)}`;
+    updateNowChord(t, false, CU.part);
+    syncChordLane(CU.part);
+    updateSheet(t, false, SU.part);
   };
   w.onTime(part.start);
+  w.onInteraction = () => {};  // a click outside the excerpt does not switch the loop off: the toggle does
+  els.partLoopCheck.checked = true;
+  syncPartLoop();
+  for (const ev of ["scroll", "zoom", "redraw", "redrawcomplete"]) w.ws.on(ev, () => syncChordLane(CU.part));
+  w.ws.on("seeking", (t) => {
+    updateNowChord(t, false, CU.part);
+    updateSheet(t, false, SU.part);
+  });
+  hide($("partLyricsCard"));
+  loadHarmony();
+  loadLyrics();
   w.ws.on("play", () => (els.partPlayBtn.innerHTML = "&#10074;&#10074; Pausar"));
   w.ws.on("pause", () => (els.partPlayBtn.innerHTML = "&#10227; Tocar trecho"));
+  w.regions.on("region-clicked", (region, e) => {
+    e.stopPropagation();
+    w.ws.setTime(clickTime(w, e));  // exact spot inside the excerpt, not its start
+  });
   w.regions.on("region-updated", (r) => {
     els.partStartInput.value = r.start.toFixed(2);
     els.partEndInput.value = r.end.toFixed(2);
-    w.loop = { start: r.start, end: r.end };
+    syncPartLoop();
     els.partRangeSaveBtn.classList.add("btn-attention");
+    renderPartSheet();
   });
   whenReady(w, () => {
     if (partWave !== w) return;
@@ -1882,7 +2582,15 @@ els.generateBtn.addEventListener("click", async () => {
 function setExcerpt(w, start, end) {
   if (w.excerpt.setOptions) w.excerpt.setOptions({ start, end });
   else w.excerpt = { start, end };
-  w.loop = { start, end };
+  syncPartLoop();
+}
+
+/** The part player loops the excerpt while "Repetir trecho" is on; off, the song plays on. */
+function syncPartLoop() {
+  const w = partWave;
+  const on = els.partLoopCheck.checked;
+  els.partLoopToggle.classList.toggle("active", on);
+  if (w && w.excerpt) w.loop = on ? { start: w.excerpt.start, end: w.excerpt.end } : null;
 }
 
 els.partPlayBtn.addEventListener("click", () => {
@@ -1894,15 +2602,54 @@ els.partPlayBtn.addEventListener("click", () => {
   }
   const { start, end } = w.excerpt;
   const t = w.ws.getCurrentTime();
-  w.loop = { start, end };
-  if (t < start || t >= end - 0.05) w.ws.setTime(start);
+  syncPartLoop();
+  // looping: start from the excerpt when the cursor is outside it; otherwise play from the cursor
+  if (w.loop && (t < start || t >= end - 0.05)) w.ws.setTime(start);
   w.ws.play();
 });
 els.partStopBtn.addEventListener("click", () => {
   const w = partWave;
   if (!w) return;
-  w.ws.pause();
+  if (w.ws.isPlaying()) w.ws.pause();  // same DAW-style stop as the song player
+  else w.ws.setTime(w.excerpt.start);
+});
+
+// space = play / pause (unless typing or on a control that handles it itself)
+document.addEventListener("keydown", (e) => {
+  if (e.code !== "Space" || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.target.closest("input, textarea, select, button, a, [contenteditable]")) return;
+  const btn = state.view === "project" ? els.projPlayBtn : state.view === "part" ? els.partPlayBtn : null;
+  if (!btn) return;
+  e.preventDefault();
+  btn.click();
+});
+els.partLoopCheck.addEventListener("change", syncPartLoop);
+
+/** Jump to the start of the excerpt and play (keeps "Repetir trecho" as it is). */
+function playPartFromStart() {
+  const w = partWave;
+  if (!w || !w.excerpt) return;
+  syncPartLoop();
   w.ws.setTime(w.excerpt.start);
+  w.ws.play();
+}
+$("partFromStartBtn").addEventListener("click", playPartFromStart);
+/** Song player: from the start of the selected section, or of the song when nothing is selected. */
+function playProjectFromStart() {
+  const w = projWave;
+  if (!w) return;
+  w.ws.setTime(sel.cur ? sel.cur.start : 0);
+  w.ws.play();
+}
+$("projFromStartBtn").addEventListener("click", playProjectFromStart);
+
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Home" || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (state.view !== "part" && state.view !== "project") return;
+  if (e.target.closest("input, textarea, select, [contenteditable]")) return;
+  e.preventDefault();
+  if (state.view === "part") playPartFromStart();
+  else playProjectFromStart();
 });
 els.partRate.addEventListener("input", () => {
   const rate = Number(els.partRate.value) / 100;

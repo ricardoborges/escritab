@@ -92,15 +92,75 @@
       </div>
       <div id="projectStatus" class="status-banner hidden"></div>
 
-      <div class="card">
-        <div class="card-head">
-          <h3>Marque as partes</h3>
-          <span class="muted">Arraste sobre a onda para marcar um trecho novo. Um clique numa parte a seleciona, dois cliques a abrem.</span>
+      <div id="playerSentinel" class="player-sentinel" aria-hidden="true"></div>
+      <div class="card player-card" id="playerCard">
+        <div class="daw-transport" role="toolbar" aria-label="Transporte">
+          <div class="tp-buttons">
+            <button type="button" class="tp-btn" id="projFromStartBtn" aria-label="Do começo" title="Tocar do começo (tecla Home)">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="5" width="2.6" height="14" rx="1"/><path d="M19 5.8v12.4a1 1 0 0 1-1.55.83L9.2 13.2a1.4 1.4 0 0 1 0-2.4l8.25-5.83A1 1 0 0 1 19 5.8z"/></svg>
+            </button>
+            <button type="button" class="tp-btn tp-play" id="projPlayBtn" aria-label="Play" title="Play / Pause (barra de espaço)">
+              <svg class="ico-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.6v12.8a1 1 0 0 0 1.52.85l10.2-6.4a1 1 0 0 0 0-1.7L9.52 4.75A1 1 0 0 0 8 5.6z"/></svg>
+              <svg class="ico-pause" viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="5" width="4" height="14" rx="1.2"/><rect x="13.5" y="5" width="4" height="14" rx="1.2"/></svg>
+            </button>
+            <button type="button" class="tp-btn" id="projStopBtn" aria-label="Parar" title="Parar aqui (Play continua deste ponto). Clique de novo para voltar ao início">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+            </button>
+          </div>
+          <div class="tp-lcd" title="Posição na música · compasso.tempo · andamento">
+            <div class="lcd-main"><span id="projTime" class="lcd-time">0:00.0</span><span class="lcd-total">/ <span id="projTimeTotal">0:00.0</span></span></div>
+            <div class="lcd-sub"><span><em>Comp</em> <b id="projBarBeat">–</b></span><span><em>BPM</em> <b id="projBpmLcd">–</b></span></div>
+          </div>
+          <label class="tp-field tp-rate" title="Mais devagar sem mudar o tom da música">
+            <span class="tp-label">Velocidade</span>
+            <input type="range" id="projRate" class="tp-slider" min="40" max="100" step="5" value="100" />
+            <strong id="projRateVal" class="rate-val tp-value">100%</strong>
+          </label>
+          <label class="tp-field tp-source">
+            <span class="tp-label">Áudio</span>
+            <select id="projSource" class="tp-select"></select>
+          </label>
+          <label class="tp-toggle tp-icon-only" title="Encaixar na batida: as bordas do trecho grudam na batida mais próxima" aria-label="Encaixar na batida">
+            <input type="checkbox" id="snapCheck" checked />
+            <span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h4v8a3 3 0 0 0 6 0V4h4v8a7 7 0 0 1-14 0V4z" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"/><path d="M5 8h4M15 8h4" stroke="currentColor" stroke-width="2.2"/></svg></span>
+          </label>
         </div>
-        <div id="projWave" class="wave"></div>
+        <canvas id="projRuler" class="time-ruler" title="Régua de tempo: clique para ir ao ponto · roda do mouse dá zoom"></canvas>
+        <div id="projWave" class="wave" title="Arraste sobre a onda para marcar um trecho novo. Um clique numa parte a seleciona, dois cliques a abrem."></div>
+        <div id="partLane" class="part-lane hidden" aria-label="Partes da música">
+          <div id="partLaneInner" class="part-lane-inner"></div>
+        </div>
         <div id="chordLane" class="chord-lane hidden" aria-label="Acordes detectados">
           <div id="chordLaneInner" class="chord-lane-inner"></div>
         </div>
+        <div id="projNav" class="wave-nav">
+          <div id="navTrack" class="nav-track" title="Arraste a janela para rolar, as bordas para dar zoom. Duplo clique: música inteira. Roda do mouse: zoom">
+            <canvas id="navCanvas" class="nav-canvas"></canvas>
+            <div id="navParts" class="nav-parts"></div>
+            <div id="navPlayed" class="nav-played"><canvas id="navCanvasPlayed" class="nav-canvas"></canvas></div>
+            <div id="navPlayhead" class="nav-playhead"></div>
+            <div id="navWindow" class="nav-window">
+              <span class="nav-handle nav-handle-l" data-edge="l"></span>
+              <span class="nav-grip"></span>
+              <span class="nav-handle nav-handle-r" data-edge="r"></span>
+            </div>
+          </div>
+          <div class="nav-tools">
+            <span class="nav-range" id="navRange">0:00.0 – 0:00.0</span>
+            <span class="nav-zoom" id="navZoomLabel" title="Zoom horizontal">1.0×</span>
+            <span class="nav-spacer"></span>
+            <div class="nav-btns" role="group" aria-label="Zoom">
+              <button type="button" class="nav-btn" id="navOutBtn" title="Menos zoom (tecla −)">&minus;</button>
+              <button type="button" class="nav-btn" id="navInBtn" title="Mais zoom (tecla +)">+</button>
+              <button type="button" class="nav-btn" id="navSelBtn" title="Zoom no trecho selecionado (tecla Z)">&#8596; Trecho</button>
+              <button type="button" class="nav-btn" id="navFitBtn" title="Mostrar a música inteira (tecla 0)">&#10530; Tudo</button>
+              <button type="button" class="nav-btn nav-toggle is-on" id="navFollowBtn" aria-pressed="true" title="A tela acompanha o cursor enquanto toca">&#9654;&#65038; Seguir</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card player-extra">
         <div id="liveChord" class="live-chord hidden" aria-live="polite">
           <div class="live-cell live-key">
             <span class="eyebrow">Tom</span>
@@ -134,24 +194,6 @@
           </label>
           <button type="button" class="btn-outline btn-small hidden" id="selClearBtn" title="Tirar a seleção e voltar a tocar a música inteira">&#10005; Limpar seleção</button>
         </div>
-        <div class="wave-transport">
-          <button type="button" class="btn-primary" id="projPlayBtn">&#9654; Play</button>
-          <button type="button" class="btn-outline" id="projStopBtn" aria-label="Parar">&#9632;</button>
-          <span class="mp-time" id="projTime">0:00 / 0:00</span>
-          <label class="inline-ctrl" title="Mais devagar sem mudar o tom da música">Velocidade
-            <input type="range" id="projRate" min="40" max="100" step="5" value="100" />
-            <strong id="projRateVal" class="rate-val">100%</strong>
-          </label>
-          <label class="inline-ctrl">Zoom
-            <input type="range" id="projZoom" min="0" max="300" step="10" value="0" />
-          </label>
-          <label class="inline-ctrl">Áudio
-            <select id="projSource"></select>
-          </label>
-          <label class="checkbox-row inline-ctrl" title="Encaixa as bordas do trecho na batida mais próxima">
-            <input type="checkbox" id="snapCheck" checked /><span>Encaixar na batida</span>
-          </label>
-        </div>
 
         <div id="draftPanel" class="draft-panel hidden">
           <div class="row-inline">
@@ -177,10 +219,17 @@
         </div>
       </div>
 
-      <div class="card" id="lyricsCard">
+      <div class="tabs" role="tablist" aria-label="Seções do projeto" id="projTabs">
+        <button type="button" role="tab" class="tab" data-tab="parts" id="tab-parts" aria-controls="partsCard">Partes <span class="tab-count" id="tabPartsCount"></span></button>
+        <button type="button" role="tab" class="tab" data-tab="lyrics" id="tab-lyrics" aria-controls="lyricsCard">Letra e cifra</button>
+        <button type="button" role="tab" class="tab" data-tab="harmony" id="tab-harmony" aria-controls="harmonyCard">Harmonia <span class="tab-dot hidden" id="tabHarmonyDot"></span></button>
+        <button type="button" role="tab" class="tab" data-tab="analysis" id="tab-analysis" aria-controls="analysisBox">MIDI <span class="tab-dot hidden" id="tabAnalysisDot"></span></button>
+      </div>
+
+      <div class="card tab-panel" id="lyricsCard" role="tabpanel" aria-labelledby="tab-lyrics" data-tab-panel="lyrics">
         <div class="card-head">
           <h3>Letra e cifra</h3>
-          <span class="muted">Cole a letra: o Whisper descobre quando cada palavra é cantada e os acordes vão em cima das sílabas.</span>
+          <span class="muted" id="lyricsIntro">Cole a letra: o Whisper descobre quando cada palavra é cantada e os acordes vão em cima das sílabas.</span>
         </div>
         <div id="lyricsStatus" class="status-banner hidden"></div>
 
@@ -217,25 +266,31 @@
           <div class="lyrics-toolbar">
             <button type="button" class="btn-primary btn-small" id="sheetPlayBtn">&#9654; Play</button>
             <span class="mp-time small" id="sheetTime">0:00</span>
-            <label class="inline-ctrl small" title="Mais devagar sem mudar o tom">Velocidade
-              <input type="range" id="sheetRate" min="40" max="100" step="5" value="100" />
-              <strong id="sheetRateVal" class="rate-val">100%</strong>
-            </label>
-            <label class="inline-ctrl small">Mostrar
-              <select id="sheetFilter"></select>
-            </label>
-            <label class="checkbox-row inline-ctrl small"><input type="checkbox" id="sheetNumerals" /><span>Graus no lugar dos acordes</span></label>
-            <label class="checkbox-row inline-ctrl small"><input type="checkbox" id="sheetFollow" checked /><span>Acompanhar</span></label>
-            <button type="button" class="btn-outline btn-small" id="lyricsEditBtn">Editar letra</button>
+            <span class="lyrics-spacer"></span>
+            <button type="button" class="btn-outline btn-small" id="sheetOptsBtn" aria-expanded="false" aria-controls="sheetOpts" title="Velocidade, filtro por parte, graus, acompanhar">&#9881; Opções <span class="chev" aria-hidden="true">&#9662;</span></button>
+            <button type="button" class="btn-outline btn-small" id="lyricsEditBtn" title="Mudar a letra, o idioma ou o modelo e alinhar de novo">&#9998; Editar letra</button>
           </div>
-          <p class="muted small" id="lyricsMeta"></p>
-          <p id="sheetNoHarmony" class="warn-text small hidden">Analise a harmonia (card abaixo) para ver os acordes em cima da letra.</p>
+          <div id="sheetOpts" class="sheet-opts hidden">
+            <div class="row-inline">
+              <label class="inline-ctrl small" title="Mais devagar sem mudar o tom">Velocidade
+                <input type="range" id="sheetRate" min="40" max="100" step="5" value="100" />
+                <strong id="sheetRateVal" class="rate-val">100%</strong>
+              </label>
+              <label class="inline-ctrl small">Mostrar
+                <select id="sheetFilter"></select>
+              </label>
+              <label class="checkbox-row inline-ctrl small"><input type="checkbox" id="sheetNumerals" /><span>Graus no lugar dos acordes</span></label>
+              <label class="checkbox-row inline-ctrl small"><input type="checkbox" id="sheetFollow" checked /><span>Acompanhar</span></label>
+            </div>
+            <p class="muted small" id="lyricsMeta"></p>
+            <p class="muted small">Clique numa linha para ir até ela. Palavras <span class="guess-sample">sublinhadas</span> não foram reconhecidas na voz, e o tempo delas é estimado.</p>
+          </div>
+          <p id="sheetNoHarmony" class="warn-text small hidden">Analise a harmonia (aba Harmonia) para ver os acordes em cima da letra.</p>
           <div id="sheet" class="sheet" aria-label="Cifra"></div>
-          <p class="muted small">Clique numa linha para ir até ela. Palavras <span class="guess-sample">sublinhadas</span> não foram reconhecidas na voz, e o tempo delas é estimado.</p>
         </div>
       </div>
 
-      <div class="card" id="harmonyCard">
+      <div class="card tab-panel" id="harmonyCard" role="tabpanel" aria-labelledby="tab-harmony" data-tab-panel="harmony">
         <div class="card-head">
           <h3>Harmonia</h3>
           <span class="muted">Tonalidade, campo harmônico e acordes detectados automaticamente. É um guia de estudo, não uma cifra exata.</span>
@@ -314,14 +369,14 @@
         </div>
       </div>
 
-      <div class="card">
+      <div class="card tab-panel" id="partsCard" role="tabpanel" aria-labelledby="tab-parts" data-tab-panel="parts">
         <div class="card-head"><h3>Partes</h3></div>
         <div id="partList" class="part-list"></div>
         <p id="partEmpty" class="muted">Nenhuma parte ainda. Selecione um trecho na onda acima e dê um nome (Intro, Riff, Solo...).</p>
       </div>
 
-      <details class="card" id="analysisBox">
-        <summary class="card-summary">Análise da música <span class="muted" id="analysisSummary"></span></summary>
+      <div class="card tab-panel" id="analysisBox" role="tabpanel" aria-labelledby="tab-analysis" data-tab-panel="analysis">
+        <div class="card-head"><h3>MIDI</h3><span class="muted" id="analysisSummary"></span></div>
         <div class="analysis-grid">
           <div class="analysis-item">
             <strong>MIDI completo (Dettato)</strong>
@@ -369,7 +424,7 @@
             <div id="mpStatus" class="status-banner hidden"></div>
           </div>
         </div>
-      </details>
+      </div>
     </section>
 
     <!-- ============ PARTE ============ -->
@@ -386,9 +441,35 @@
           <span class="muted">A velocidade muda sem alterar o tom.</span>
         </div>
         <div id="partWave" class="wave"></div>
+        <div id="partChordLane" class="chord-lane hidden" aria-label="Acordes detectados">
+          <div id="partChordLaneInner" class="chord-lane-inner"></div>
+        </div>
+        <div id="partLiveChord" class="live-chord hidden" aria-live="polite">
+          <div class="live-cell live-key">
+            <span class="eyebrow">Tom</span>
+            <strong id="partLiveKey"></strong>
+          </div>
+          <div class="live-cell live-now">
+            <span class="eyebrow">Acorde agora</span>
+            <div class="live-now-row">
+              <strong id="partLiveChordName" class="live-chord-name">–</strong>
+              <span id="partLiveNumeral" class="now-numeral"></span>
+              <span id="partLiveFn" class="live-fn muted"></span>
+            </div>
+            <div class="live-progress" title="Quanto falta para o acorde trocar"><span id="partLiveProgress"></span></div>
+            <p id="partLiveInfo" class="muted small"></p>
+          </div>
+          <div class="live-cell live-next">
+            <span class="eyebrow">Próximo</span>
+            <strong id="partLiveNext" class="live-next-name">–</strong>
+            <span id="partLiveNextNum" class="muted small"></span>
+          </div>
+        </div>
+        <p id="partHarmonyHint" class="live-hint muted small hidden">Para ver os acordes ao vivo, analise a harmonia na página da música (card "Harmonia").</p>
         <div class="wave-transport">
-          <button type="button" class="btn-primary" id="partPlayBtn">&#10227; Tocar trecho</button>
-          <button type="button" class="btn-outline" id="partStopBtn" aria-label="Parar">&#9632;</button>
+          <button type="button" class="btn-primary" id="partPlayBtn" title="Play / Pause (barra de espaço)">&#10227; Tocar trecho</button>
+          <button type="button" class="btn-outline" id="partFromStartBtn" title="Tocar do começo do trecho (tecla Home)">&#9198; Do começo</button>
+          <button type="button" class="btn-outline" id="partStopBtn" aria-label="Parar" title="Parar aqui (Play continua deste ponto). Clique de novo para voltar ao início do trecho">&#9632;</button>
           <span class="mp-time" id="partTime">0:00</span>
           <label class="inline-ctrl">Velocidade
             <input type="range" id="partRate" min="40" max="100" step="5" value="100" />
@@ -396,6 +477,9 @@
           </label>
           <label class="inline-ctrl">Áudio
             <select id="partSource"></select>
+          </label>
+          <label id="partLoopToggle" class="loop-toggle active" title="Toca o trecho em loop. Desligado, a música segue depois do fim do trecho">
+            <input type="checkbox" id="partLoopCheck" checked /><span>&#10227; Repetir trecho</span>
           </label>
         </div>
         <details class="advanced">
@@ -409,6 +493,19 @@
         </details>
       </div>
 
+      <div class="card hidden" id="partLyricsCard">
+        <div class="card-head">
+          <h3>Cifra do trecho</h3>
+          <span class="muted">A letra deste trecho com os acordes. Para carregar ou corrigir a letra, use a página da música.</span>
+        </div>
+        <div class="lyrics-toolbar">
+          <label class="checkbox-row inline-ctrl small"><input type="checkbox" id="partSheetNumerals" /><span>Graus no lugar dos acordes</span></label>
+          <label class="checkbox-row inline-ctrl small"><input type="checkbox" id="partSheetFollow" checked /><span>Acompanhar</span></label>
+        </div>
+        <p id="partSheetHint" class="muted small hidden"></p>
+        <div id="partSheet" class="sheet part-sheet"></div>
+      </div>
+
       <div class="card controls-stack">
         <div class="card-head"><h3>Transcrição do trecho</h3></div>
         <div class="row-inline" id="sourcePicker">
@@ -416,7 +513,7 @@
           <label class="checkbox-row"><input type="radio" name="partSource" value="multitrack" /><span>Faixas do MIDI completo</span></label>
           <label class="checkbox-row"><input type="radio" name="partSource" value="stem" /><span>Stem do Demucs</span></label>
         </div>
-        <p id="srcNone" class="status-banner hidden">Este projeto ainda não foi analisado. Volte ao projeto e rode o Dettato ou o Demucs em "Análise da música".</p>
+        <p id="srcNone" class="status-banner hidden">Este projeto ainda não foi analisado. Volte ao projeto e rode o Dettato ou o Demucs na aba "MIDI".</p>
 
         <div id="srcMultitrack" class="controls-stack hidden">
           <div class="row-inline" id="trackPicks">
