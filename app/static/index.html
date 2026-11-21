@@ -98,10 +98,42 @@
           <span class="muted">Arraste sobre a onda para selecionar um trecho. Clique numa parte para ouvi-la em loop; dois cliques abrem a parte.</span>
         </div>
         <div id="projWave" class="wave"></div>
+        <div id="chordLane" class="chord-lane hidden" aria-label="Acordes detectados">
+          <div id="chordLaneInner" class="chord-lane-inner"></div>
+        </div>
+        <div id="liveChord" class="live-chord hidden" aria-live="polite">
+          <div class="live-cell live-key">
+            <span class="eyebrow">Tom</span>
+            <strong id="liveKey"></strong>
+          </div>
+          <div class="live-cell live-now">
+            <span class="eyebrow">Acorde agora</span>
+            <div class="live-now-row">
+              <strong id="liveChordName" class="live-chord-name">–</strong>
+              <span id="liveNumeral" class="now-numeral"></span>
+              <span id="liveFn" class="live-fn muted"></span>
+            </div>
+            <div class="live-progress" title="Quanto falta para o acorde trocar"><span id="liveProgress"></span></div>
+            <p id="liveInfo" class="muted small"></p>
+          </div>
+          <div class="live-cell live-next">
+            <span class="eyebrow">Próximo</span>
+            <strong id="liveNext" class="live-next-name">–</strong>
+            <span id="liveNextNum" class="muted small"></span>
+          </div>
+        </div>
+        <div id="liveHint" class="live-hint hidden">
+          <span class="muted">Para ver os acordes ao vivo enquanto a música toca, analise a harmonia.</span>
+          <button type="button" class="btn-outline btn-small" id="liveAnalyzeBtn">Analisar harmonia</button>
+        </div>
         <div class="wave-transport">
           <button type="button" class="btn-primary" id="projPlayBtn">&#9654; Play</button>
           <button type="button" class="btn-outline" id="projStopBtn" aria-label="Parar">&#9632;</button>
           <span class="mp-time" id="projTime">0:00 / 0:00</span>
+          <label class="inline-ctrl" title="Mais devagar sem mudar o tom da música">Velocidade
+            <input type="range" id="projRate" min="40" max="100" step="5" value="100" />
+            <strong id="projRateVal" class="rate-val">100%</strong>
+          </label>
           <label class="inline-ctrl">Zoom
             <input type="range" id="projZoom" min="0" max="300" step="10" value="0" />
           </label>
@@ -134,6 +166,85 @@
             <button type="button" class="btn-primary" id="draftSaveBtn">Salvar parte</button>
             <button type="button" class="btn-outline" id="draftCancelBtn">Descartar</button>
           </div>
+        </div>
+      </div>
+
+      <div class="card" id="harmonyCard">
+        <div class="card-head">
+          <h3>Harmonia</h3>
+          <span class="muted">Tonalidade, campo harmônico e acordes detectados automaticamente. É um guia de estudo, não uma cifra exata.</span>
+        </div>
+        <div class="row-inline">
+          <button type="button" class="btn-outline" id="harmonyBtn">Analisar harmonia</button>
+          <span class="muted" id="harmonyMeta"></span>
+        </div>
+        <div id="harmonyStatus" class="status-banner hidden"></div>
+
+        <div id="harmonyBody" class="harmony-body hidden">
+          <div class="harmony-panel">
+            <span class="eyebrow">Tonalidade</span>
+            <strong id="hKeyName" class="key-name"></strong>
+            <div class="confidence" title="Confiança da detecção"><span id="hKeyConfBar"></span></div>
+            <span class="muted small" id="hKeyConf"></span>
+            <div class="scale-notes" id="hScale"></div>
+            <p id="hKeyCharacter"></p>
+            <p class="muted small" id="hKeyExtra"></p>
+          </div>
+
+          <section class="harmony-section">
+            <div class="section-head">
+              <h4>Campo harmônico</h4>
+              <span class="muted small">Os 7 acordes que nascem da escala. A barra mostra quanto cada um aparece na música. Clique para destacá-lo na faixa de acordes.</span>
+            </div>
+            <div class="field-grid" id="hField"></div>
+            <div class="fn-legend">
+              <span><i class="fn-dot fn-T"></i>Tônica: repouso</span>
+              <span><i class="fn-dot fn-S"></i>Subdominante: afastamento</span>
+              <span><i class="fn-dot fn-D"></i>Dominante: tensão</span>
+              <span><i class="fn-dot fn-X"></i>Fora do campo</span>
+            </div>
+          </section>
+
+          <section class="harmony-section">
+            <div class="section-head">
+              <h4>Progressões que se repetem</h4>
+              <span class="muted small">Sequências de acordes que voltam várias vezes. Clique para ouvir a primeira vez em loop.</span>
+            </div>
+            <div id="hLoops" class="loop-list"></div>
+          </section>
+
+          <section class="harmony-section" id="hPartsSection">
+            <div class="section-head">
+              <h4>Acordes de cada parte</h4>
+            </div>
+            <div id="hParts" class="hparts-list"></div>
+          </section>
+
+          <section class="harmony-section" id="hOutsideSection">
+            <div class="section-head">
+              <h4>Acordes fora do campo</h4>
+              <span class="muted small">Onde a música sai da escala, e o porquê mais provável.</span>
+            </div>
+            <div id="hOutside" class="outside-list"></div>
+          </section>
+
+          <details class="glossary">
+            <summary>O que significa tudo isso?</summary>
+            <dl>
+              <dt>Tonalidade</dt>
+              <dd>A nota que soa como "casa" (a tônica) e a escala que a música usa em volta dela. Saber o tom diz quais notas e acordes vão soar "certos".</dd>
+              <dt>Campo harmônico</dt>
+              <dd>Os 7 acordes formados empilhando notas da escala, um sobre cada nota. A maior parte das músicas usa quase só esses acordes.</dd>
+              <dt>Graus (I, iv, bVII...)</dt>
+              <dd>A posição do acorde contada a partir da tônica. Maiúsculo é acorde maior, minúsculo é menor e ° é diminuto. O "b" indica meio tom abaixo do grau da escala maior (bVII é o sétimo grau abaixado). Pensar em graus deixa você tocar a mesma progressão em qualquer tom.</dd>
+              <dt>Função</dt>
+              <dd>O papel do acorde na música: <strong>tônica</strong> repousa, <strong>subdominante</strong> afasta e <strong>dominante</strong> cria tensão que pede a volta para casa.</dd>
+              <dt>Power chord (A5, E5...)</dt>
+              <dd>Só fundamental e quinta, sem a terça, por isso não é maior nem menor. O campo harmônico indica qual acorde ele está representando.</dd>
+              <dt>Como foi detectado</dt>
+              <dd>O áudio é convertido em "cromagrama" (quanto de cada uma das 12 notas soa a cada batida) e comparado com modelos de acordes. Usa as stems sem bateria e voz quando existem, e o MIDI completo do Dettato quando ele foi gerado. Espere acertar mais ou menos 2 de cada 3 acordes: confira de ouvido.</dd>
+            </dl>
+          </details>
         </div>
       </div>
 

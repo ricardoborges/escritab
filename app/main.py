@@ -207,6 +207,23 @@ def create_app(workspace_root: Path | str = Path("workspace/jobs")) -> FastAPI:
             "info": info,
         }
 
+    @app.get("/api/projects/{project_id}/harmony")
+    def get_harmony(project_id: str):
+        """The cached harmony analysis, or null when it has not been run yet."""
+        _, job_dir = load(project_id)
+        return {"harmony": projects.load_harmony(job_dir)}
+
+    @app.post("/api/projects/{project_id}/harmony")
+    def analyze_harmony(project_id: str):
+        job, job_dir = load(project_id)
+        if projects.ensure_project(job, job_dir):
+            manager.save_job(job)
+        try:
+            result = projects.compute_harmony(job, job_dir)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Falha na análise harmônica: {exc}") from exc
+        return {"harmony": result}
+
     # ---------- parts ----------
 
     @app.post("/api/projects/{project_id}/parts")

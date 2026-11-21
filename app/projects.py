@@ -19,7 +19,7 @@ import numpy as np
 import soundfile as sf
 
 from app.models import JobMetadata, NoteEvent, Part, TabParams, TranscriptionParams
-from app.pipeline import dettato_transcriber
+from app.pipeline import dettato_transcriber, harmony
 from app.pipeline.audio_cleaner import apply_bandpass_filter, apply_noise_gate, mix_stem_files
 from app.pipeline.exporters import export_ascii_tab, export_gp5, export_musicxml
 from app.pipeline.fretboard import optimize_fretboard
@@ -75,6 +75,50 @@ def analyze_audio(job: JobMetadata, job_dir: Path) -> None:
         json.dumps({"duration": job.duration, "peaks": [round(float(v), 3) for v in peaks]}),
         encoding="utf-8",
     )
+
+
+HARMONY_FILE = "harmony.json"
+NON_HARMONIC_STEMS = {"drums", "vocals"}
+VOICE_PROGRAMS = set(range(52, 56)) | {85}  # choir / voice / synth voice: melody, not harmony
+
+
+def compute_harmony(job: JobMetadata, job_dir: Path) -> dict:
+    """Key, chords and harmonic field of the whole song (cached in harmony.json).
+
+    Uses the stems without drums and vocals when they exist (a much cleaner chroma), otherwise the
+    harmonic part of the mix; blends in the full-song Dettato MIDI when it has been generated."""
+    stems = [s for s in job.stems if s not in NON_HARMONIC_STEMS]
+    bass_y = None
+    if stems:
+        y = None
+        for name in stems:
+            s, _ = librosa.load(str(job_dir / job.stems[name]), sr=harmony.SR, mono=True)
+            if name == "bass":
+                bass_y = s
+            y = s if y is None else y[: len(s)] + s[: len(y)]
+        source = "stems: " + " + ".join(stems)
+    else:
+        y, _ = librosa.load(str(job_dir / job.input_path), sr=harmony.SR, mono=True)
+        y = librosa.effects.harmonic(y, margin=2.0)
+        source = "mix (sem bateria via HPSS)"
+
+    midi_notes = None
+    full_midi = job_dir / job.artifacts.get("multitrack_midi", "full_song.mid")
+    if job.multitrack and full_midi.exists():
+        indices = [t.index for t in job.multitrack if not t.is_drum and t.program not in VOICE_PROGRAMS]
+        midi_notes = dettato_transcriber.notes_from_midi_tracks(full_midi, indices) or None
+
+    duration = job.duration or len(y) / harmony.SR
+    result = harmony.analyze(y, job.beats, duration, bass_y=bass_y, midi_notes=midi_notes, source=source)
+    result["created_at"] = now_iso()
+    result["stems"] = sorted(stems)
+    (job_dir / HARMONY_FILE).write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+    return result
+
+
+def load_harmony(job_dir: Path) -> dict | None:
+    path = job_dir / HARMONY_FILE
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
 
 
 def ensure_project(job: JobMetadata, job_dir: Path) -> bool:

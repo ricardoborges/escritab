@@ -58,6 +58,8 @@ const els = {
   projPlayBtn: $("projPlayBtn"),
   projStopBtn: $("projStopBtn"),
   projTime: $("projTime"),
+  projRate: $("projRate"),
+  projRateVal: $("projRateVal"),
   projZoom: $("projZoom"),
   projSource: $("projSource"),
   snapCheck: $("snapCheck"),
@@ -543,20 +545,27 @@ async function renderProjectView() {
   fillSourceSelect(els.projSource, "");
   hide(els.draftPanel);
   els.projZoom.value = "0";
+  setProjRate(100);
 
   projWave = await createWave(els.projWave, "");
   const w = projWave;
   w.onTime = (t) => {
     els.projTime.textContent = `${fmtClock(t)} / ${fmtClock(p.duration)}`;
+    updateNowChord(t);
+    syncChordLane();
   };
   w.onTime(0);
   w.ws.on("play", () => (els.projPlayBtn.innerHTML = "&#10074;&#10074; Pause"));
   w.ws.on("pause", () => (els.projPlayBtn.innerHTML = "&#9654; Play"));
+  for (const ev of ["scroll", "zoom", "redraw", "redrawcomplete"]) w.ws.on(ev, syncChordLane);
+  w.ws.on("seeking", (t) => updateNowChord(t));
   whenReady(w, () => {
     if (projWave !== w) return;
     drawPartRegions();
     w.regions.enableDragSelection({ color: DRAFT_COLOR });
+    syncChordLane();
   });
+  loadHarmony();
   w.regions.on("region-created", (region) => {
     if (region.id.startsWith("part-")) return;
     if (w.draft && w.draft !== region) w.draft.remove();
@@ -696,6 +705,7 @@ function renderPartList() {
           ready ? "Estudar →" : "Transcrever →")));
     els.partList.append(row);
   }
+  renderHarmonyParts();
 }
 
 els.projPlayBtn.addEventListener("click", () => {
@@ -711,8 +721,20 @@ els.projZoom.addEventListener("input", () => {
   if (projWave && projWave.ws.getDecodedData()) projWave.ws.zoom(Number(els.projZoom.value));
 });
 els.projSource.addEventListener("change", () => {
-  if (projWave) switchSource(projWave, els.projSource.value);
+  if (!projWave) return;
+  switchSource(projWave, els.projSource.value);
+  // loading another file resets the media element's rate
+  projWave.ws.once("ready", () => projWave && projWave.ws.setPlaybackRate(Number(els.projRate.value) / 100, true));
 });
+
+/** Slower playback keeping the pitch, so the chords still match what you play. */
+function setProjRate(pct) {
+  els.projRate.value = String(pct);
+  els.projRateVal.textContent = `${pct}%`;
+  els.projRateVal.classList.toggle("slowed", pct < 100);
+  if (projWave) projWave.ws.setPlaybackRate(pct / 100, true);
+}
+els.projRate.addEventListener("input", () => setProjRate(Number(els.projRate.value)));
 els.snapCheck.addEventListener("change", () => {
   if (projWave && projWave.draft) {
     snapDraft();
@@ -780,6 +802,7 @@ function renderAnalysis() {
 
   show(els.mixerBox, tracks.length > 0);
   renderMixer();
+  if (harmonyIsCurrent()) renderHarmony();  // new stems / MIDI: suggest re-analysing
 }
 
 function trackLabel(t) {
@@ -863,6 +886,341 @@ async function runSeparate(model) {
 
 els.multitrackBtn.addEventListener("click", () => runMultitrack());
 els.separateBtn.addEventListener("click", () => runSeparate());
+
+// ---------- project: harmony (key, harmonic field, chords) ----------
+
+const H = {
+  data: null,        // harmony.json of the open project
+  projectId: null,
+  nowIdx: -1,        // chord under the playhead
+  highlight: null,   // root (pc) highlighted from the harmonic field
+};
+const hEls = {
+  btn: $("harmonyBtn"),
+  meta: $("harmonyMeta"),
+  status: $("harmonyStatus"),
+  body: $("harmonyBody"),
+  keyName: $("hKeyName"),
+  keyConf: $("hKeyConf"),
+  keyConfBar: $("hKeyConfBar"),
+  scale: $("hScale"),
+  keyCharacter: $("hKeyCharacter"),
+  keyExtra: $("hKeyExtra"),
+  live: $("liveChord"),
+  liveHint: $("liveHint"),
+  liveAnalyzeBtn: $("liveAnalyzeBtn"),
+  liveKey: $("liveKey"),
+  liveChordName: $("liveChordName"),
+  liveNumeral: $("liveNumeral"),
+  liveFn: $("liveFn"),
+  liveProgress: $("liveProgress"),
+  liveInfo: $("liveInfo"),
+  liveNext: $("liveNext"),
+  liveNextNum: $("liveNextNum"),
+  field: $("hField"),
+  loops: $("hLoops"),
+  parts: $("hParts"),
+  partsSection: $("hPartsSection"),
+  outside: $("hOutside"),
+  outsideSection: $("hOutsideSection"),
+  lane: $("chordLane"),
+  laneInner: $("chordLaneInner"),
+};
+const FN_NAMES = { T: "tônica", S: "subdominante", D: "dominante" };
+
+function chordFunction(c) {
+  if (!c.diatonic || !c.degree) return "X";
+  return H.data.field[c.degree - 1].function;
+}
+
+async function loadHarmony() {
+  const projectId = state.project.job_id;
+  H.data = null;
+  H.projectId = projectId;
+  H.nowIdx = -1;
+  H.highlight = null;
+  H.loaded = false;
+  hide(hEls.status);
+  renderHarmony();
+  try {
+    const data = await api(projectUrl("/harmony"));
+    if (H.projectId !== projectId) return;
+    H.data = data.harmony;
+    H.loaded = true;
+    renderHarmony();
+  } catch (err) {
+    banner(hEls.status, `Erro ao carregar a harmonia: ${err.message}`, "error");
+  }
+}
+
+async function runHarmony() {
+  if (state.busy || !state.project) return;
+  setBusy(true);
+  hEls.btn.disabled = true;
+  banner(hEls.status, "Analisando a harmonia da música inteira... costuma levar de 10 a 40 segundos.", "busy");
+  const projectId = state.project.job_id;
+  try {
+    const data = await postJson(`/api/projects/${projectId}/harmony`);
+    if (H.projectId === projectId) {
+      H.data = data.harmony;
+      H.nowIdx = -1;
+      H.highlight = null;
+      hide(hEls.status);
+      renderHarmony();
+    }
+  } catch (err) {
+    banner(hEls.status, `Erro: ${err.message}`, "error");
+  } finally {
+    hEls.btn.disabled = false;
+    setBusy(false);
+  }
+}
+hEls.btn.addEventListener("click", () => runHarmony());
+hEls.liveAnalyzeBtn.addEventListener("click", () => runHarmony());
+
+/** Stems / full MIDI that appeared after the analysis would make it more precise. */
+function harmonyStaleReason(h) {
+  const p = state.project;
+  const harmonicStems = Object.keys(p.stems || {}).filter((s) => s !== "drums" && s !== "vocals");
+  const reasons = [];
+  if (!(h.stems || []).length && harmonicStems.length && !p.is_isolated_stem) reasons.push("as stems");
+  if (!h.used_midi && hasMultitrack()) reasons.push("o MIDI completo");
+  return reasons.length ? `Agora ${reasons.join(" e ")} já existe(m): analise de novo para um resultado mais preciso.` : "";
+}
+
+function renderHarmony() {
+  const h = H.data;
+  if (h && !harmonyIsCurrent()) return;
+  show(hEls.body, !!h);
+  show(hEls.lane, !!h);
+  show(hEls.live, !!h);
+  // the hint waits for the GET, so it does not flash while the saved analysis loads
+  show(hEls.liveHint, !h && H.loaded);
+  hEls.meta.classList.remove("warn-text");
+  hEls.btn.textContent = h ? "Analisar de novo" : "Analisar harmonia";
+  if (!h) {
+    hEls.meta.textContent = hasStems() || hasMultitrack()
+      ? "Descobre o tom, o campo harmônico e os acordes da música."
+      : "Descobre o tom, o campo harmônico e os acordes. Fica mais preciso depois de separar as stems (em \"Análise da música\").";
+    hEls.laneInner.innerHTML = "";
+    return;
+  }
+  const src = h.used_midi ? `${h.source} + MIDI Dettato` : h.source;
+  const stale = harmonyStaleReason(h);
+  hEls.meta.textContent = stale || `Fonte: ${src} · ${h.stats.distinct_chords} acordes diferentes · ${Math.round(h.stats.diatonic_share * 100)}% do tempo dentro do campo.`;
+  hEls.meta.classList.toggle("warn-text", !!stale);
+  renderKey(h);
+  renderField(h);
+  renderLoops(h);
+  renderOutside(h);
+  renderHarmonyParts();
+  renderChordLane();
+  updateNowChord(projWave ? projWave.ws.getCurrentTime() : 0, true);
+}
+
+function renderKey(h) {
+  const k = h.key;
+  hEls.keyName.textContent = k.name;
+  hEls.liveKey.textContent = k.name;
+  const pct = Math.round(k.confidence * 100);
+  hEls.keyConfBar.style.width = `${pct}%`;
+  hEls.keyConf.textContent = `Confiança ${pct}%${pct < 50 && k.alternatives.length ? ` · também pode ser ${k.alternatives.join(" ou ")}` : ""}`;
+  hEls.scale.innerHTML = "";
+  k.scale.forEach((n, i) => hEls.scale.append(el("span", { class: "scale-note" + (i === 0 ? " tonic" : "") }, n)));
+  hEls.keyCharacter.textContent = `${k.character} ${k.characteristic}`;
+  const extra = [];
+  if (k.relative) extra.push(`Relativa: ${k.relative} (mesmas notas, outra "casa").`);
+  if (Math.abs(h.tuning_cents) >= 10) {
+    extra.push(`A gravação está ${h.tuning_cents > 0 ? "+" : ""}${h.tuning_cents} cents fora do Lá 440. Ajuste a afinação para tocar junto.`);
+  }
+  hEls.keyExtra.textContent = extra.join(" ");
+}
+
+function renderField(h) {
+  hEls.field.innerHTML = "";
+  const maxShare = Math.max(0.01, ...h.field.map((f) => f.share));
+  for (const f of h.field) {
+    const card = el("button", {
+      type: "button",
+      class: `field-card fn-${f.function}` + (f.share < 0.01 ? " unused" : "") + (H.highlight === f.root ? " active" : ""),
+      title: `${f.function_pt}${f.characteristic ? ". Acorde característico do modo." : ""}`,
+      onclick: () => {
+        H.highlight = H.highlight === f.root ? null : f.root;
+        renderField(h);
+        renderChordLane();
+      },
+    },
+      el("span", { class: "field-numeral" }, f.numeral),
+      el("strong", { class: "field-chord" }, f.triad),
+      el("span", { class: "field-tetrad muted" }, f.tetrad),
+      el("span", { class: "field-fn" }, FN_NAMES[f.function]),
+      el("span", { class: "usage" }, el("span", { style: `width:${Math.round((f.share / maxShare) * 100)}%` })),
+      el("span", { class: "muted small" }, f.share >= 0.01 ? `${Math.round(f.share * 100)}%` : "não aparece"));
+    if (f.characteristic) card.append(el("span", { class: "badge char-badge" }, "característico"));
+    hEls.field.append(card);
+  }
+}
+
+function renderLoops(h) {
+  hEls.loops.innerHTML = "";
+  if (!h.loops.length) {
+    hEls.loops.append(el("p", { class: "muted" }, "Nenhuma sequência clara se repete (ou a detecção variou demais)."));
+    return;
+  }
+  for (const loop of h.loops) {
+    const seq = el("span", { class: "loop-seq" });
+    loop.chords.forEach((c, i) => {
+      if (i) seq.append(el("span", { class: "loop-arrow" }, "→"));
+      seq.append(el("span", { class: "loop-chord" }, el("strong", {}, c), el("small", {}, loop.numerals[i])));
+    });
+    hEls.loops.append(el("button", {
+      type: "button",
+      class: "loop-row",
+      title: "Ouvir a primeira ocorrência em loop",
+      onclick: () => projWave && playLoop(projWave, loop.starts[0], loop.ends[0]),
+    }, seq, el("span", { class: "badge" }, `${loop.count}×`), el("span", { class: "muted small" }, `1ª vez em ${fmtClock(loop.starts[0], 0)}`)));
+  }
+}
+
+function renderOutside(h) {
+  hEls.outside.innerHTML = "";
+  show(hEls.outsideSection, h.outside.length > 0);
+  for (const o of h.outside.slice(0, 8)) {
+    hEls.outside.append(el("button", {
+      type: "button",
+      class: "outside-row",
+      title: "Ir para a primeira vez que ele aparece",
+      onclick: () => projWave && projWave.ws.setTime(o.first),
+    },
+      el("span", { class: "outside-chord" }, el("strong", {}, o.label), el("small", {}, o.numeral)),
+      el("span", { class: "outside-text" }, o.explain),
+      el("span", { class: "muted small" }, `${o.count}× · ${o.seconds.toFixed(1)} s`)));
+  }
+}
+
+/** Chords inside [start, end): consecutive repeats merged. */
+function chordsBetween(start, end) {
+  const out = [];
+  for (const c of H.data.chords) {
+    if (c.end <= start + 0.05 || c.start >= end - 0.05) continue;
+    const prev = out[out.length - 1];
+    if (prev && prev.label === c.label) continue;
+    out.push(c);
+  }
+  return out;
+}
+
+function harmonyIsCurrent() {
+  return !!H.data && !!state.project && H.projectId === state.project.job_id;
+}
+
+function renderHarmonyParts() {
+  if (!harmonyIsCurrent()) return;
+  const parts = state.project.parts;
+  hEls.parts.innerHTML = "";
+  show(hEls.partsSection, parts.length > 0);
+  for (const part of parts) {
+    const chords = chordsBetween(part.start, part.end);
+    const seq = el("span", { class: "hpart-seq" });
+    chords.slice(0, 16).forEach((c) => {
+      seq.append(el("span", { class: `mini-chord fn-${chordFunction(c)}`, title: c.numeral }, c.label));
+    });
+    if (chords.length > 16) seq.append(el("span", { class: "muted" }, `+${chords.length - 16}`));
+    if (!chords.length) seq.append(el("span", { class: "muted" }, "sem acordes detectados"));
+    hEls.parts.append(el("div", { class: "hpart-row" },
+      el("span", { class: "part-dot", style: `background:${partColor(part)}` }),
+      el("strong", { class: "part-name" }, part.name),
+      seq));
+  }
+}
+
+function renderChordLane() {
+  const h = H.data;
+  hEls.laneInner.innerHTML = "";
+  if (!h) return;
+  const dur = (state.peaks && state.peaks.duration) || state.project.duration || 1;
+  h.chords.forEach((c, i) => {
+    const fn = chordFunction(c);
+    const dim = H.highlight !== null && c.root !== H.highlight;
+    const tip = [c.label, c.numeral, fn !== "X" ? FN_NAMES[fn] : "fora do campo", c.implied ? `representa ${c.implied}` : ""]
+      .filter(Boolean).join(" · ") + (c.explain ? `\n${c.explain}` : "");
+    hEls.laneInner.append(el("button", {
+      type: "button",
+      class: `lane-chord fn-${fn}` + (dim ? " dim" : "") + (i === H.nowIdx ? " now" : ""),
+      style: `left:${(c.start / dur) * 100}%;width:${((c.end - c.start) / dur) * 100}%`,
+      title: tip,
+      dataset: { idx: String(i) },
+      onclick: () => projWave && projWave.ws.setTime(c.start + 0.01),
+    }, c.label));
+  });
+  syncChordLane();
+}
+
+/** Follow the waveform's zoom and horizontal scroll. */
+function syncChordLane() {
+  if (!projWave || !H.data) return;
+  const wrap = projWave.ws.getWrapper();
+  const scroller = wrap && wrap.parentElement;
+  if (!wrap) return;
+  hEls.laneInner.style.width = `${wrap.scrollWidth}px`;
+  hEls.laneInner.style.transform = `translateX(${-(scroller ? scroller.scrollLeft : 0)}px)`;
+}
+
+function chordIndexAt(t) {
+  const chords = H.data.chords;
+  let lo = 0;
+  let hi = chords.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (t < chords[mid].start) hi = mid - 1;
+    else if (t >= chords[mid].end) lo = mid + 1;
+    else return mid;
+  }
+  return -1;
+}
+
+/** Live strip under the waveform: chord now (grau, função), time left on it, next chord. */
+function updateNowChord(t, force = false) {
+  if (!harmonyIsCurrent()) return;
+  const chords = H.data.chords;
+  let idx = chordIndexAt(t);
+  // in a silence between chords, show what is coming
+  const nextIdx = idx >= 0 ? idx + 1 : chords.findIndex((c) => c.start > t);
+  const cur = idx >= 0 ? chords[idx] : null;
+  hEls.liveProgress.style.width = cur ? `${Math.min(100, ((t - cur.start) / (cur.end - cur.start)) * 100)}%` : "0%";
+  if (idx === H.nowIdx && !force) return;
+
+  const old = hEls.laneInner.querySelector(".lane-chord.now");
+  if (old) old.classList.remove("now");
+  H.nowIdx = idx;
+  const next = nextIdx >= 0 ? chords[nextIdx] : null;
+  hEls.liveNext.textContent = next ? next.label : "–";
+  hEls.liveNext.className = `live-next-name${next ? ` fn-${chordFunction(next)}` : ""}`;
+  hEls.liveNextNum.textContent = next ? next.numeral : "";
+  if (!cur) {
+    hEls.liveChordName.textContent = "–";
+    hEls.liveChordName.className = "live-chord-name";
+    hEls.liveNumeral.textContent = "";
+    hEls.liveFn.textContent = "";
+    hEls.liveInfo.textContent = t < 0.05 ? "Dê play para acompanhar os acordes." : "Sem acorde (pausa ou só bateria).";
+    hEls.live.className = "live-chord";
+    return;
+  }
+  const node = hEls.laneInner.querySelector(`[data-idx="${idx}"]`);
+  if (node) node.classList.add("now");
+  const fn = chordFunction(cur);
+  hEls.live.className = `live-chord fn-${fn}`;
+  hEls.liveChordName.textContent = cur.label;
+  hEls.liveChordName.className = `live-chord-name fn-${fn}`;
+  hEls.liveNumeral.textContent = cur.numeral;
+  hEls.liveNumeral.className = `now-numeral fn-${fn}`;
+  hEls.liveFn.textContent = fn !== "X" ? FN_NAMES[fn] : "fora do campo";
+  const info = [];
+  if (cur.implied) info.push(`Power chord (sem terça): aqui representa o ${cur.implied}.`);
+  if (cur.explain) info.push(cur.explain);
+  else if (fn !== "X") info.push(H.data.field[cur.degree - 1].function_pt + ".");
+  hEls.liveInfo.textContent = info.join(" ");
+}
 
 // ---------- view: part ----------
 
