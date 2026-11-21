@@ -132,6 +132,7 @@ const els = {
   speedSelect: $("speedSelect"),
   alphaTabContainer: $("alphaTabContainer"),
   alphaTabViewport: $("alphaTabViewport"),
+  tabStatus: $("tabStatus"),
   asciiPreviewBox: $("asciiPreviewBox"),
 };
 
@@ -1203,16 +1204,35 @@ els.partDeleteBtn.addEventListener("click", async () => {
 
 // ---------- tab player (AlphaTab) ----------
 
+// Keep in sync with the <script> tag in index.html (never @latest: a new release can break playback).
+const ALPHATAB_CDN = "https://cdn.jsdelivr.net/npm/@coderline/alphatab@1.9.0/dist";
+let tabFontLoaded = null; // SoundFont URL the tab player currently has
+
+/** Load the SoundFont chosen for the tab player if it is not the one already loaded. */
+function syncTabFont() {
+  const url = tabFontUrl();
+  if (!alphaTabApi || url === tabFontLoaded) return;
+  tabFontLoaded = url;
+  // The player only exists once the score has loaded and then loads settings.player.soundFont;
+  // before that, loadSoundFont() is silently ignored.
+  alphaTabApi.settings.player.soundFont = url;
+  if (alphaTabApi.player) alphaTabApi.loadSoundFont(url, false);
+}
+
 function initAlphaTab(musicXmlUrl) {
-  if (typeof alphaTab === "undefined") return;
+  if (typeof alphaTab === "undefined") {
+    banner(els.tabStatus, "O AlphaTab não carregou (sem internet para baixar do CDN?).", "error");
+    return;
+  }
   if (alphaTabApi) {
     alphaTabApi.destroy();
     els.alphaTabContainer.innerHTML = "";
   }
+  hide(els.tabStatus);
   alphaTabApi = new alphaTab.AlphaTabApi(els.alphaTabContainer, {
     core: {
       file: musicXmlUrl,
-      fontDirectory: "https://cdn.jsdelivr.net/npm/@coderline/alphatab@latest/dist/font/",
+      fontDirectory: `${ALPHATAB_CDN}/font/`,
     },
     player: {
       enablePlayer: true,
@@ -1221,6 +1241,17 @@ function initAlphaTab(musicXmlUrl) {
       soundFont: tabFontUrl(),
       scrollElement: els.alphaTabViewport,
     },
+  });
+  tabFontLoaded = tabFontUrl();
+  // Without these the tab player fails silently (Play does nothing, no sound).
+  alphaTabApi.soundFontLoad.on((e) => {
+    if (e.total > 0 && e.loaded < e.total) banner(els.tabStatus, `Carregando o som da tablatura... ${Math.round((e.loaded / e.total) * 100)}%`, "busy");
+  });
+  alphaTabApi.soundFontLoaded.on(() => hide(els.tabStatus));
+  alphaTabApi.playerReady.on(() => hide(els.tabStatus));
+  alphaTabApi.error.on((err) => {
+    console.error("[EscriTab] AlphaTab", err);
+    banner(els.tabStatus, `Erro no player da tablatura: ${(err && err.message) || err}`, "error");
   });
   alphaTabApi.isLooping = els.loopCheck.checked;
   alphaTabApi.playbackSpeed = Number(els.speedSelect.value);
@@ -1253,7 +1284,7 @@ bindSlider(els.minLenSlider, els.minLenVal, (v) => v);
 
 // ---------- SoundFonts + full-song MIDI player ----------
 
-const SONIVOX_URL = "https://cdn.jsdelivr.net/npm/@coderline/alphatab@latest/dist/soundfont/sonivox.sf2";
+const SONIVOX_URL = `${ALPHATAB_CDN}/soundfont/sonivox.sf2`;
 const PREFS_KEY = "escritab.sound";
 // pretty_midi's layout: one channel per instrument in file order, skipping 9 (drums always on 9)
 const MELODIC_CHANNELS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15];
@@ -1355,6 +1386,7 @@ async function refreshSoundfonts() {
   addOption(mpEls.tabFont, "", "Sonivox (padrão, leve)");
   gm.forEach((f) => addOption(mpEls.tabFont, f.id, `${f.name} (${f.size_mb} MB)`));
   restoreValue(mpEls.tabFont, prefs.tab);
+  syncTabFont(); // the tab may have been created before the saved choice was restored
 
   mpEls.hint.textContent = sound.fonts.length
     ? `${sound.fonts.length} SoundFont(s) em ${sound.dirs.join(", ")}`
@@ -1549,7 +1581,7 @@ els.multitrackTracks.addEventListener("click", (e) => {
 
 mpEls.tabFont.addEventListener("change", () => {
   savePrefs();
-  if (alphaTabApi) alphaTabApi.loadSoundFont(tabFontUrl(), false);
+  syncTabFont();
 });
 
 // ---------- init ----------

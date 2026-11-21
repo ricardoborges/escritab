@@ -4,6 +4,7 @@ import xml.etree.ElementTree as ET
 import guitarpro
 from app.models import TUNINGS, TabParams, TabSlice
 
+GUITAR_MIDI_PROGRAM = 30  # General MIDI "Distortion Guitar" (0-based)
 
 PITCH_CLASS_NAMES = [
     ("C", 0),
@@ -59,6 +60,12 @@ def export_musicxml(
     part_list = ET.SubElement(score, "part-list")
     score_part = ET.SubElement(part_list, "score-part", id="P1")
     ET.SubElement(score_part, "part-name").text = f"Guitar ({preset.name})"
+    # Without a midi-instrument, players (AlphaTab) fall back to program 0 = piano.
+    score_inst = ET.SubElement(score_part, "score-instrument", id="P1-I1")
+    ET.SubElement(score_inst, "instrument-name").text = "Distortion Guitar"
+    midi_inst = ET.SubElement(score_part, "midi-instrument", id="P1-I1")
+    ET.SubElement(midi_inst, "midi-channel").text = "1"
+    ET.SubElement(midi_inst, "midi-program").text = str(GUITAR_MIDI_PROGRAM + 1)  # MusicXML is 1-based
 
     part = ET.SubElement(score, "part", id="P1")
 
