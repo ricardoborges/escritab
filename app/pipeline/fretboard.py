@@ -8,7 +8,7 @@ StateAssignment = tuple[tuple[int, int, NoteEvent], ...]  # ((string_idx, fret, 
 
 def _group_into_time_slices(
     notes: list[NoteEvent],
-    window_s: float = 0.030,
+    window_s: float = 0.045,
 ) -> list[list[NoteEvent]]:
     if not notes:
         return []
@@ -148,6 +148,28 @@ def _state_cost(
             cost -= 3.0
             if 2 in low_map and low_map[2] == low_map[0]:
                 cost -= 2.0
+    elif len(state) >= 2:
+        # Standard tuning power-chord shape bonus: root on s, 5th on s+1 (+2 frets), octave on s+2 (+2 frets)
+        s_map = {item[0]: item[1] for item in state}
+        for s0 in (0, 1):
+            if s0 in s_map and (s0 + 1) in s_map and s_map[s0 + 1] == s_map[s0] + 2:
+                cost -= 3.0
+                if (s0 + 2) in s_map and s_map[s0 + 2] == s_map[s0] + 2:
+                    cost -= 2.0
+
+    # Wound low strings at high frets sound muddy and are physically awkward for solos / leads
+    num_strings = len(preset.pitches)
+    for s_idx, fret, _ in state:
+        # Distance from highest string: 0 = E4, 1 = B3, 2 = G3, 3 = D3, 4 = A2, 5 = E2
+        from_top = (num_strings - 1) - s_idx
+        if from_top >= 4 and fret > 7:
+            cost += (fret - 7) * (1.8 if from_top == 4 else 2.4)
+        elif from_top == 3 and fret > 12:
+            cost += (fret - 12) * 1.4
+        if preference == "high":
+            # In lead/solo mode, strongly prefer the top 4 strings (D3, G3, B3, E4)
+            if from_top >= 4:
+                cost += 12.0 + from_top * 3.0
 
     return cost
 
@@ -176,11 +198,11 @@ def _transition_cost(
         time_weight = min(4.0, 0.25 / dt)
         dist_cost = abs(c_curr - c_prev) * (1.0 + time_weight)
 
-    # Mild string jump penalty for consecutive single notes
+    # String jump penalty for consecutive single notes (skipping strings mid-phrase is awkward)
     string_penalty = 0.0
     if len(prev_state) == 1 and len(curr_state) == 1:
         s_diff = abs(curr_state[0][0] - prev_state[0][0])
-        string_penalty = s_diff * 0.45
+        string_penalty = s_diff * 1.2 + max(0, s_diff - 1) * 2.5
 
     return dist_cost + string_penalty
 
@@ -190,7 +212,7 @@ def optimize_fretboard(
     params: TabParams,
 ) -> tuple[list[TabSlice], dict[str, int]]:
     preset = TUNINGS.get(params.tuning, TUNINGS["standard_e"])
-    raw_slices = _group_into_time_slices(notes, window_s=0.030)
+    raw_slices = _group_into_time_slices(notes, window_s=0.045)
     if not raw_slices:
         return [], {"transposed_notes": 0, "dropped_notes": 0, "total_slices": 0}
 

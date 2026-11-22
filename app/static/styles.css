@@ -757,53 +757,206 @@ details.card:not([open]) {
   font-size: 0.88rem;
 }
 
+/* ---------- processing pipeline (before the player) ---------- */
+[data-view="project"].is-processing > :not(.view-head):not(#pipelineCard):not(#projectStatus) {
+  display: none !important;
+}
+.pipeline {
+  max-width: 640px;
+  width: 100%;
+  margin: 1.5rem auto 0;
+}
+.pipeline-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 1rem;
+}
+.pipeline-head h3 {
+  font-size: 1.05rem;
+}
+.pipeline-steps {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+}
+.pl-step {
+  position: relative;
+  display: flex;
+  gap: 0.85rem;
+  padding: 0.55rem 0;
+}
+/* the line linking one step to the next */
+.pl-step:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  left: 0.85rem;
+  top: 2.3rem;
+  bottom: -0.55rem;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--border);
+}
+.pl-step.is-done:not(:last-child)::after,
+.pl-step.is-skipped:not(:last-child)::after {
+  background: var(--success);
+}
+.pl-mark {
+  flex: none;
+  width: 1.7rem;
+  height: 1.7rem;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 0.8rem;
+  font-weight: 700;
+  border: 2px solid var(--border);
+  color: var(--text-muted);
+  background: var(--bg-input);
+}
+.pl-step.is-done .pl-mark {
+  border-color: var(--success);
+  background: var(--success);
+  color: #06281d;
+}
+.pl-step.is-skipped .pl-mark {
+  border-color: var(--success);
+  color: var(--success);
+}
+.pl-step.is-running .pl-mark {
+  border-color: var(--primary);
+  color: transparent;
+  border-top-color: transparent;
+  animation: spin 0.9s linear infinite;
+}
+.pl-step.is-error .pl-mark {
+  border-color: #f85149;
+  background: #f85149;
+  color: #fff;
+}
+.pl-step.is-todo .pl-body strong {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+.pl-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+  padding-top: 0.2rem;
+}
+.pl-hint {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+.pl-clock {
+  color: var(--primary);
+  font-variant-numeric: tabular-nums;
+}
+.pl-error {
+  color: #f85149;
+}
+.pipeline-bar {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--bg-input);
+  overflow: hidden;
+}
+.pipeline-bar span {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--primary);
+  transition: width 0.4s ease;
+}
+.pipeline-choice {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.pipeline-choice.hidden {
+  display: none;
+}
+.pl-step.is-waiting .pl-mark {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+#pipelineNote {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+/* model weights downloading under the running step (first run only) */
+.pl-downloads {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  margin-top: 0.45rem;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-input);
+}
+.pl-downloads.hidden {
+  display: none;
+}
+.pl-dl {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.pl-dl-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.25rem 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+.pl-dl-bar {
+  position: relative;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+}
+.pl-dl-bar span {
+  display: block;
+  height: 100%;
+  background: var(--primary);
+  border-radius: inherit;
+  transition: width 0.6s linear;
+}
+.pl-dl.is-done .pl-dl-bar span {
+  background: var(--success);
+}
+.pl-dl.is-error .pl-dl-bar span {
+  background: #f85149;
+}
+.pl-dl-bar.is-indeterminate span {
+  position: absolute;
+  animation: pl-dl-slide 1.2s ease-in-out infinite;
+}
+@keyframes pl-dl-slide {
+  from { left: -30%; }
+  to { left: 100%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pl-step.is-running .pl-mark {
+    animation: none;
+  }
+  .pl-dl-bar.is-indeterminate span {
+    animation: none;
+    left: 0;
+  }
+}
+
 /* ---------- projects ---------- */
 .projects-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
   gap: 1.25rem;
   align-items: start;
-}
-.choice-group {
-  border: none;
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-}
-.choice-group legend {
-  font-size: 0.9rem;
-  margin-bottom: 0.4rem;
-}
-.choice {
-  display: flex;
-  gap: 0.6rem;
-  align-items: flex-start;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 0.65rem 0.8rem;
-  background: var(--bg-input);
-  cursor: pointer;
-  font-size: 0.9rem;
-}
-.choice:has(input:checked) {
-  border-color: var(--primary);
-}
-.choice small {
-  color: var(--text-muted);
-}
-.choice input {
-  margin-top: 0.25rem;
-}
-.mode-tag {
-  font-size: 0.68rem;
-  font-weight: 700;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  color: var(--success);
-  border: 1px solid var(--success);
-  border-radius: 999px;
-  padding: 0.05rem 0.5rem;
-  margin-left: 0.3rem;
 }
 .project-list {
   display: flex;
@@ -1021,6 +1174,87 @@ details.card:not([open]) {
 .lyrics-editor.hidden,
 .lyrics-view.hidden {
   display: none;
+}
+.genius-search {
+  display: flex;
+  gap: 0.5rem;
+}
+.genius-search input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.genius-results {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  max-height: 22rem;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-input);
+}
+.genius-results.hidden {
+  display: none;
+}
+.genius-results li + li {
+  border-top: 1px solid var(--border);
+}
+.genius-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 0.7rem;
+  background: transparent;
+  border: none;
+  color: var(--text-main);
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+.genius-item:hover:not(:disabled),
+.genius-item:focus-visible {
+  background: var(--bg-card);
+  outline: none;
+}
+.genius-item:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+.genius-item.is-loading {
+  opacity: 1;
+}
+.genius-item img,
+.genius-noart {
+  flex: none;
+  width: 44px;
+  height: 44px;
+  border-radius: 6px;
+  object-fit: cover;
+  background: var(--bg-card);
+  display: grid;
+  place-items: center;
+  color: var(--text-muted);
+}
+.genius-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.genius-text strong,
+.genius-text span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.genius-use {
+  flex: none;
+  color: var(--primary);
+  font-weight: 600;
+}
+.genius-item.is-loading .genius-use::after {
+  content: "…";
 }
 .lyrics-editor textarea {
   width: 100%;
@@ -2181,6 +2415,56 @@ details.card:not([open]) {
   .tp-toggle { margin-left: 0; }
   .tp-slider { width: 90px; }
 }
+/* part page: tab panels are wrappers that keep the .view gap layout */
+.part-panel {
+  display: contents;
+}
+#partTabs {
+  scroll-margin-top: calc(var(--part-player-h, 0px) + 0.75rem);
+}
+.tab-empty {
+  align-items: flex-start;
+}
+/* the scales card lives in its own tab: always open, the summary is just a header */
+.part-panel .scale-card > summary {
+  cursor: default;
+  pointer-events: none;
+}
+.part-panel .scale-card > summary h3::before {
+  content: none;
+}
+
+/* tab player transport (same look as the main DAW transport) */
+.tab-transport {
+  margin-bottom: 1rem;
+}
+.tp-group-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-left: auto;
+}
+.tp-group-right .tp-toggle {
+  margin-left: 0;
+}
+.tp-btn-square {
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  background: #0a0d12;
+  border-color: #262c35;
+  color: var(--text-muted);
+}
+.tp-btn-square svg {
+  fill: none;
+}
+.tp-btn-square:hover {
+  color: var(--text-main);
+  background: #121820;
+}
+@media (max-width: 640px) {
+  .tp-group-right { margin-left: 0; }
+}
 .tp-icon-only span {
   padding: 0;
   width: 32px;
@@ -2543,4 +2827,356 @@ details.scale-card:not([open]) {
   .scale-body {
     grid-template-columns: minmax(0, 1fr);
   }
+}
+
+/* ---------- lyrics: tag stanzas (modal) ---------- */
+.lyrics-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+}
+.tag-dialog {
+  width: min(820px, calc(100vw - 2rem));
+}
+.tag-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+  padding: 1.25rem 1.5rem;
+  max-height: calc(100vh - 2rem);
+}
+.tag-palette {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  padding-bottom: 0.8rem;
+  border-bottom: 1px solid var(--border);
+}
+.tag-chip.is-active {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: #fff;
+}
+.tag-chip:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.tag-none {
+  color: var(--text-muted);
+}
+.tag-custom {
+  width: 8.5rem;
+  padding: 0.25rem 0.55rem !important;
+  font-size: 0.82rem !important;
+}
+.tag-stanzas {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  overflow-y: auto;
+  min-height: 8rem;
+  flex: 1 1 auto;
+  padding-right: 0.25rem;
+}
+.tag-stanza {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 8.5rem minmax(0, 1fr);
+  gap: 0.9rem;
+  align-items: start;
+  text-align: left;
+  padding: 0.6rem 0.8rem;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-main);
+  font: inherit;
+  cursor: pointer;
+}
+.tag-stanza:hover {
+  border-color: var(--text-muted);
+}
+.tag-stanza.is-selected {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 1px var(--primary);
+}
+.tag-lines {
+  white-space: pre-line;
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+.tag-stanza.is-untagged .tag-lines {
+  color: var(--text-muted);
+}
+.tag-stanza.is-selected .tag-lines {
+  color: var(--text-main);
+}
+.tag-pill {
+  justify-self: start;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 0.15rem 0.6rem;
+  border-radius: 999px;
+  border: 1px dashed var(--border);
+  color: var(--text-muted);
+}
+.tag-pill.tone-verse { border: 1px solid #3b82f6; color: #93c5fd; background: rgba(59, 130, 246, 0.14); }
+.tag-pill.tone-chorus { border: 1px solid #f59e0b; color: #fcd34d; background: rgba(245, 158, 11, 0.14); }
+.tag-pill.tone-pre { border: 1px solid #a78bfa; color: #c4b5fd; background: rgba(167, 139, 250, 0.14); }
+.tag-pill.tone-bridge { border: 1px solid #10b981; color: #6ee7b7; background: rgba(16, 185, 129, 0.14); }
+.tag-pill.tone-edge { border: 1px solid #94a3b8; color: #cbd5e1; background: rgba(148, 163, 184, 0.14); }
+.tag-pill.tone-other { border: 1px solid #f472b6; color: #f9a8d4; background: rgba(244, 114, 182, 0.14); }
+@media (max-width: 560px) {
+  .tag-stanza {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.4rem;
+  }
+}
+.tag-side {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+}
+.tag-time {
+  font-variant-numeric: tabular-nums;
+}
+.section-guess {
+  margin-left: 0.25rem;
+  color: var(--accent);
+  font-weight: 700;
+}
+/* ---------- project: fine-tune a part ---------- */
+.part-edit-panel {
+  border-color: rgba(59, 130, 246, 0.55);
+  background: rgba(59, 130, 246, 0.06);
+}
+.pe-time {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+.pe-time > span {
+  margin-right: 0.15rem;
+}
+.pe-time input {
+  width: 6.5rem;
+  font-variant-numeric: tabular-nums;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  text-align: center;
+}
+.pe-time.pe-name input {
+  width: min(18rem, 60vw);
+  font-family: inherit;
+  text-align: left;
+}
+.pe-time input.invalid {
+  border-color: #f85149;
+  box-shadow: 0 0 0 2px rgba(248, 81, 73, 0.25);
+}
+/* ---------- player audio source: original mix or stems ---------- */
+.src-picker {
+  position: relative;
+}
+.src-btn {
+  min-width: 9rem;
+  max-width: 14rem;
+  text-align: left;
+  color: var(--text-main);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.src-menu {
+  position: absolute;
+  top: calc(100% + 0.4rem);
+  right: 0;
+  z-index: 40;
+  width: 17rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.5rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+}
+.src-menu.hidden {
+  display: none;
+}
+.src-opt {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.4rem 0.5rem;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.88rem;
+}
+.src-opt:hover {
+  background: var(--bg-input);
+}
+.src-opt > span {
+  display: flex;
+  flex-direction: column;
+}
+.src-sep {
+  margin: 0.35rem 0.5rem 0.1rem;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+.src-quick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  padding: 0.4rem 0.5rem 0.2rem;
+  border-top: 1px solid var(--border);
+  margin-top: 0.3rem;
+}
+.src-quick .chip {
+  font-size: 0.75rem;
+}
+.src-note {
+  padding: 0.2rem 0.5rem 0;
+}
+/* edit mode: every part edge is a visible, grabbable handle */
+.wave.pe-mode {
+  border-color: rgba(59, 130, 246, 0.7);
+  box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.35);
+}
+.wave.pe-mode ::part(region-handle) {
+  width: 8px !important;
+  border: none !important;
+  background: linear-gradient(90deg, transparent 2px, rgba(255, 255, 255, 0.85) 2px, rgba(255, 255, 255, 0.85) 4px, transparent 4px) !important;
+  cursor: ew-resize !important;
+}
+.wave.pe-mode ::part(region-handle):hover {
+  background: linear-gradient(90deg, transparent 1px, #f59e0b 1px, #f59e0b 5px, transparent 5px) !important;
+}
+.lane-part.is-editing {
+  outline: 2px solid #fff;
+  outline-offset: -2px;
+}
+
+/* selection bar inside the player, right above the timeline */
+.player-card .selection-bar {
+  min-height: 2.5rem;
+  padding: 0.3rem 0.4rem 0.3rem 0.75rem;
+  font-size: 0.84rem;
+  flex-wrap: nowrap;
+  border-style: solid;
+  border-color: #232a33;
+  background: #0b0f14;
+}
+.player-card .selection-bar.has-selection {
+  border-color: color-mix(in srgb, var(--primary) 55%, var(--border));
+  background: rgba(59, 130, 246, 0.08);
+}
+.player-card .sel-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.player-card .selection-bar:not(.has-selection) .sel-label {
+  color: var(--text-muted);
+}
+.player-card .selection-bar .loop-toggle,
+.player-card .selection-bar .btn-small {
+  flex: none;
+}
+@media (max-width: 720px) {
+  .player-card .selection-bar {
+    flex-wrap: wrap;
+  }
+  .player-card .sel-label {
+    flex-basis: 100%;
+    white-space: normal;
+  }
+}
+/* ---------- synced lyrics over the waveform ---------- */
+.wave-stack {
+  position: relative;
+}
+.lyric-overlay {
+  position: absolute;
+  z-index: 4;  /* above the waveform canvas and the part regions */
+  inset: 1px;
+  overflow: hidden;
+  pointer-events: none;  /* clicks and drags go to the waveform underneath */
+  border-radius: 7px;
+}
+.lyric-overlay.hidden {
+  display: none;
+}
+.lyric-overlay-inner {
+  position: relative;
+  height: 100%;
+  width: 100%;
+  will-change: transform;
+}
+.lo-line {
+  position: absolute;
+  top: 58%;
+  box-sizing: border-box;
+  max-width: max-content;
+  padding: 0.12rem 0.45rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: #fff;
+  background: rgba(8, 11, 16, 0.72);
+  border-left: 2px solid rgba(255, 255, 255, 0.7);  /* marks the exact time the line starts */
+  border-radius: 0 4px 4px 0;
+  transition: color 0.15s, background 0.15s;
+}
+.lo-line.now {
+  color: #1a1206;
+  background: #fde68a;
+  border-left-color: #f59e0b;
+}
+.lo-line.tiny {
+  visibility: hidden;
+}
+@media (prefers-reduced-motion: reduce) {
+  .lo-line {
+    transition: none;
+  }
+}
+/* new part: how it fits into the timeline */
+.draft-fit {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.18);
+}
+.draft-fit.hidden {
+  display: none;
+}
+.draft-fit-list {
+  margin: 0 0 0 1.6rem;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+.draft-fit-list.is-off {
+  text-decoration: line-through;
+  opacity: 0.6;
 }

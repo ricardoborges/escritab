@@ -43,8 +43,6 @@ const els = {
   audioFileInput: $("audioFileInput"),
   fileNameDisplay: $("fileNameDisplay"),
   projectNameInput: $("projectNameInput"),
-  isolatedStemCheck: $("isolatedStemCheck"),
-  demucsModelSelect: $("demucsModelSelect"),
   createProjectBtn: $("createProjectBtn"),
   uploadStatus: $("uploadStatus"),
   projectList: $("projectList"),
@@ -66,7 +64,6 @@ const els = {
   loopToggle: $("loopToggle"),
   selClearBtn: $("selClearBtn"),
   projRateVal: $("projRateVal"),
-  projSource: $("projSource"),
   snapCheck: $("snapCheck"),
   draftPanel: $("draftPanel"),
   draftName: $("draftName"),
@@ -139,9 +136,10 @@ const els = {
   dlTxt: $("dlTxt"),
   playPauseBtn: $("playPauseBtn"),
   stopBtn: $("stopBtn"),
-  loopCheck: $("loopCheck"),
+  tabLoopCheck: $("tabLoopCheck"),
   metronomeCheck: $("metronomeCheck"),
-  speedSelect: $("speedSelect"),
+  tabRate: $("tabRate"),
+  tabRateVal: $("tabRateVal"),
   alphaTabContainer: $("alphaTabContainer"),
   alphaTabViewport: $("alphaTabViewport"),
   tabStatus: $("tabStatus"),
@@ -275,12 +273,496 @@ async function route() {
       return;
     }
     showView(r.view);
-    if (r.view === "project") await renderProjectView();
-    else await renderPartView();
+    if (r.view === "project") {
+      hide(els.projectStatus);
+      if (await pipelineNeeded()) startPipeline();
+      else {
+        showPipeline(false);
+        await renderProjectView();
+      }
+    } else await renderPartView();
   } catch (err) {
     showView("projects");
     await loadProjectList();
     banner(els.uploadStatus, `Não foi possível abrir: ${err.message}`, "error");
+  }
+}
+
+// ---------- project: processing pipeline (shown before the player) ----------
+// Upload + tempo happen in POST /api/projects; then the full-song MIDI (Dettato), the stems
+// (Demucs) and the harmony, which reads both (stems: cleaner chroma + bass; MIDI: notes). Only when all of it is done the player and the tabs appear.
+
+const PL = {
+  jobs: {},    // projectId -> { steps: {id: status}, error, startedAt, stepStartedAt, skipped }
+  timer: null,
+};
+const PL_STEPS = [
+  { id: "upload", label: "Áudio recebido" },
+  { id: "tempo", label: "Andamento e batidas" },
+  { id: "midi", label: "Instrumentos em MIDI", hint: "Dettato" },
+  { id: "stems", label: "Separar os instrumentos", hint: "Demucs" },
+  { id: "harmony", label: "Tom e acordes" },
+  { id: "lyrics", label: "Letra", hint: "Genius" },
+  { id: "sync", label: "Sincronizar a letra com a voz", hint: "Whisper" },
+  { id: "tags", label: "Marcar as partes da letra", hint: "opcional" },
+  { id: "intro", label: "Marcar as partes na música" },
+];
+const WHISPER_LANGS = ["pt", "en", "es", "fr", "it", "de", "ja"];
+
+/** True when the open project still lacks the MIDI or the harmony (or is being processed now). */
+async function pipelineNeeded() {
+  const p = state.project;
+  const job = PL.jobs[p.job_id];
+  if (job) return !job.finished;
+  if (p.mode !== "classic" && !hasMultitrack()) return true;
+  if (!hasStems()) return true;
+  try {
+    const data = await api(projectUrl("/harmony"));
+    return !data.harmony;
+  } catch {
+    return false;  // cannot tell: open the player, the harmony tab has its own button
+  }
+}
+
+function showPipeline(on) {
+  const section = document.querySelector('[data-view="project"]');
+  section.classList.toggle("is-processing", on);
+  show($("pipelineCard"), on);
+  if (on) {
+    const p = state.project;
+    els.projNameInput.value = p.name;
+    els.projBpmInput.value = p.detected_bpm;
+    els.projMeta.textContent = `${fmtClock(p.duration, 0)} · ${p.original_filename}`;
+  }
+}
+
+function startPipeline() {
+  const p = state.project;
+  showPipeline(true);
+  if (!PL.jobs[p.job_id]) {
+    PL.jobs[p.job_id] = {
+      steps: { upload: "done", tempo: "done", midi: "todo", stems: "todo", harmony: "todo", lyrics: "todo", sync: "todo", tags: "todo", intro: "todo" },
+      error: null, startedAt: Date.now(), stepStartedAt: Date.now(), finished: false,
+    };
+    runPipeline(p.job_id);
+  }
+  renderPipeline();
+  clearInterval(PL.timer);
+  PL.timer = setInterval(renderPipelineClock, 1000);
+}
+
+async function runPipeline(projectId) {
+  const job = PL.jobs[projectId];
+  job.error = null;
+  setBusy(true);
+  try {
+    const p0 = await api(`/api/projects/${projectId}`);
+    // MIDI: Dettato over the whole song (old Demucs projects skip it)
+    if (p0.mode === "classic" || (p0.multitrack || []).length) {
+      if (job.steps.midi !== "done") job.steps.midi = p0.mode === "classic" ? "skipped" : "done";
+    } else if (job.steps.midi !== "done") {
+      await pipelineStep(projectId, "midi", async () => {
+        const data = await postJson(`/api/projects/${projectId}/multitrack`, { split_guitar_roles: els.splitRolesCheck.checked });
+        if (state.project && state.project.job_id === projectId) state.project = { ...data.job, parts: state.project.parts };
+      });
+    }
+    // stems: Demucs over the original upload
+    if (job.steps.stems !== "done") {
+      const cur = state.project && state.project.job_id === projectId ? state.project : p0;
+      if (Object.keys(cur.stems || {}).length) job.steps.stems = "done";
+      else {
+        await pipelineStep(projectId, "stems", async () => {
+          const data = await postJson(`/api/projects/${projectId}/separate`, { model: "htdemucs_6s" });
+          if (state.project && state.project.job_id === projectId) state.project = { ...data.job, parts: state.project.parts };
+        });
+      }
+    }
+    // harmony: always redone after a fresh MIDI / stems, so it uses them
+    if (job.steps.harmony !== "done") {
+      await pipelineStep(projectId, "harmony", () => postJson(`/api/projects/${projectId}/harmony`));
+    }
+    // lyrics: search Genius by the song name; the user confirms (or skips) in the card
+    if (!["done", "skipped"].includes(job.steps.lyrics)) {
+      if (await pipelineLyricsSearch(projectId)) {
+        setBusy(false);
+        return;  // pipelineLyricsChoice() resumes the pipeline
+      }
+    }
+    // sync: Whisper listens to the vocals stem and times every word of the chosen lyrics
+    if (job.steps.lyrics !== "done") job.steps.sync = "skipped";
+    else if (!["done", "skipped"].includes(job.steps.sync)) {
+      await pipelineStep(projectId, "sync", async () => {
+        const cur = await api(`/api/projects/${projectId}/lyrics`);
+        if (cur.lyrics) return;  // already aligned
+        if (!cur.draft || !cur.draft.text.trim()) throw new Error("a letra escolhida não foi encontrada no projeto");
+        const lang = WHISPER_LANGS.includes(cur.draft.language) ? cur.draft.language : null;
+        const data = await postJson(`/api/projects/${projectId}/lyrics`, { text: cur.draft.text, language: lang, model: "turbo" });
+        job.syncNote = `${Math.round(data.lyrics.stats.matched_share * 100)}% das palavras reconhecidas na voz`;
+        L.openLyrics = projectId;
+      });
+    }
+    const synced = job.steps.sync === "done";
+    // tags: the user names each stanza (verse, chorus...) or skips; the timing is kept
+    if (!synced) job.steps.tags = "skipped";
+    else if (!["done", "skipped"].includes(job.steps.tags)) {
+      const cur = await api(`/api/projects/${projectId}/lyrics`);
+      job.tagsLyrics = cur.lyrics;
+      job.steps.tags = "waiting";
+      L.openLyrics = projectId;
+      setBusy(false);
+      if (state.project && state.project.job_id === projectId) renderPipeline();
+      return;  // pipelineTagsDone() resumes the pipeline
+    }
+    // parts on the timeline: every section when the user tagged the stanzas, else just the intro
+    // (from the start of the song to the first stanza)
+    if (!synced) job.steps.intro = "skipped";
+    else if (!["done", "skipped"].includes(job.steps.intro)) {
+      await pipelineStep(projectId, "intro", async () => {
+        const all = job.steps.tags === "done";
+        const data = await postJson(`/api/projects/${projectId}/parts/from-lyrics${all ? "" : "?only_intro=true"}`, {});
+        if (state.project && state.project.job_id === projectId) state.project = data.job;
+        const intro = data.job.parts.find((pt) => /^intro/i.test(pt.name) && pt.start === 0);
+        if (all) job.introNote = `${data.job.parts.length} partes na linha do tempo${intro ? `, com a intro (${fmtClock(intro.start, 0)}–${fmtClock(intro.end, 0)})` : ""}`;
+        else job.introNote = intro ? `${intro.name}: ${fmtClock(intro.start, 0)}–${fmtClock(intro.end)}`
+          : "a voz começa logo no início: sem intro instrumental";
+      });
+    }
+    job.finished = true;
+  } catch (err) {
+    job.error = err.message;
+  } finally {
+    setBusy(false);
+  }
+  if (state.view === "project" && state.project && state.project.job_id === projectId) {
+    if (job.finished) {
+      clearInterval(PL.timer);
+      delete PL.jobs[projectId];
+      route();  // now the project opens normally, with player and tabs
+    } else renderPipeline();
+  } else if (job.finished) delete PL.jobs[projectId];
+}
+
+async function pipelineStep(projectId, id, fn) {
+  const job = PL.jobs[projectId];
+  job.steps[id] = "running";
+  job.stepStartedAt = Date.now();
+  if (state.project && state.project.job_id === projectId) renderPipeline();
+  try {
+    await fn();
+    job.steps[id] = "done";
+  } catch (err) {
+    job.steps[id] = "error";
+    throw err;
+  }
+}
+
+/** "Ação  de Graças!" -> "acao de gracas": exact title match, ignoring case, accents and punctuation. */
+function normTitle(s) {
+  return (s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+}
+
+/** Runs the Genius search; true when there are matches waiting for the user's choice. */
+async function pipelineLyricsSearch(projectId) {
+  const job = PL.jobs[projectId];
+  const finish = (status, note) => {
+    job.steps.lyrics = status;
+    job.lyricsNote = note;
+  };
+  job.steps.lyrics = "running";
+  job.stepStartedAt = Date.now();
+  if (state.project && state.project.job_id === projectId) renderPipeline();
+  try {
+    const current = await api(`/api/projects/${projectId}/lyrics`);
+    if (current.lyrics) {
+      finish("done", "o projeto já tem letra");
+      job.steps.sync = "done";
+      job.syncNote = "já sincronizada";
+      job.steps.tags = "skipped";
+      job.tagsNote = "a letra já estava pronta: edite as partes na aba \"Letra e cifra\"";
+      return false;
+    }
+    if (current.draft && current.draft.text.trim()) {
+      finish("done", current.draft.source || "letra já salva no projeto");
+      return false;
+    }
+    const p = await api(`/api/projects/${projectId}`);
+    const query = geniusQueryFromName(p.name);
+    job.lyricsQuery = query;
+    const { results } = await api(`/api/lyrics/search?q=${encodeURIComponent(query)}&limit=20`);
+    const wanted = normTitle(query);
+    job.lyricsResults = results.filter((r) => normTitle(r.title) === wanted);
+    if (!job.lyricsResults.length) {
+      finish("skipped", `nenhuma letra no Genius com o nome exato "${query}": pesquise na aba "Letra e cifra"`);
+      return false;
+    }
+    job.steps.lyrics = "waiting";
+    if (state.project && state.project.job_id === projectId) renderPipeline();
+    return true;
+  } catch (err) {
+    // the lyrics never block the project: say why and move on
+    finish("skipped", `não foi possível pesquisar (${err.message})`);
+    return false;
+  }
+}
+
+/** The user picked a result (or null = skip): fetch it and open the project. */
+async function pipelineLyricsChoice(projectId, result) {
+  const job = PL.jobs[projectId];
+  if (!job || job.steps.lyrics !== "waiting") return;
+  if (result) {
+    job.steps.lyrics = "running";
+    job.stepStartedAt = Date.now();
+    renderPipeline();
+    try {
+      const data = await api(`/api/lyrics/genius/${result.id}`);
+      const current = await api(`/api/projects/${projectId}/lyrics`);
+      if (!current.lyrics) {
+        await sendJson("PUT", `/api/projects/${projectId}/lyrics/draft`, {
+          text: data.text, language: data.language || null, source: `Genius: ${data.title} · ${data.artist}`,
+        });
+      }
+      job.steps.lyrics = "done";
+      job.lyricsNote = `${data.title} · ${data.artist}`;
+    } catch (err) {
+      job.steps.lyrics = "skipped";
+      job.lyricsNote = `não foi possível baixar a letra (${err.message})`;
+    }
+  } else {
+    job.steps.lyrics = "skipped";
+    job.lyricsNote = "pulada";
+  }
+  runPipeline(projectId);  // goes on with the sync (or finishes, when the lyrics were skipped)
+}
+
+/** Opens the tagging modal on the synced lyrics (with each stanza's time). */
+function pipelineOpenTags(projectId) {
+  const job = PL.jobs[projectId];
+  const ly = job && job.tagsLyrics;
+  if (!ly) return;
+  openTagDialog({
+    text: ly.text,
+    times: ly.lines.map((l) => l.start),
+    onSave: (text) => pipelineTagsDone(projectId, text),
+  });
+}
+
+/** Tags applied (text) or skipped (null): save them without re-running Whisper, then go on. */
+async function pipelineTagsDone(projectId, text) {
+  const job = PL.jobs[projectId];
+  if (!job || job.steps.tags !== "waiting") return;
+  if (text === null) {
+    job.steps.tags = "skipped";
+    job.tagsNote = "pulada: as partes são inferidas da letra";
+  } else {
+    job.steps.tags = "running";
+    job.stepStartedAt = Date.now();
+    renderPipeline();
+    try {
+      await sendJson("PATCH", `/api/projects/${projectId}/lyrics/sections`, { text });
+      const n = parseStanzas(text).filter((s) => s.tag).length;
+      job.steps.tags = "done";
+      job.tagsNote = `${n} estrofe(s) marcada(s)`;
+    } catch (err) {
+      job.steps.tags = "waiting";
+      renderPipeline();
+      banner($("pipelineStatus"), `Não foi possível salvar as partes: ${err.message}`, "error");
+      return;
+    }
+  }
+  hide($("pipelineStatus"));
+  runPipeline(projectId);
+}
+
+function renderPipelineLyricsChoice(job, projectId) {
+  const box = $("pipelineChoice");
+  box.innerHTML = "";
+  const waiting = job.steps.lyrics === "waiting";
+  show(box, waiting);
+  if (!waiting) return;
+  const list = el("ul", { class: "genius-results" });
+  for (const r of job.lyricsResults) {
+    const meta = [r.artist, r.year].filter(Boolean).join(" · ");
+    const pending = r.lyrics_state && r.lyrics_state !== "complete";
+    list.append(el("li", {},
+      el("button", { type: "button", class: "genius-item", onclick: () => pipelineLyricsChoice(projectId, r) },
+        r.thumbnail ? el("img", { src: r.thumbnail, alt: "", loading: "lazy", width: "44", height: "44" }) : el("span", { class: "genius-noart" }, "♪"),
+        el("span", { class: "genius-text" },
+          el("strong", {}, r.title),
+          el("span", { class: "muted small" }, meta + (pending ? " · letra incompleta" : ""))),
+        el("span", { class: "genius-use small" }, "Usar esta"))));
+  }
+  box.append(
+    el("strong", { class: "small" }, "Qual destas é a sua música?"),
+    list,
+    el("div", { class: "row-inline" },
+      el("button", { type: "button", class: "btn-outline btn-small", onclick: () => pipelineLyricsChoice(projectId, null) }, "Nenhuma: pular a letra")));
+}
+
+function stepDetail(id, status) {
+  const p = state.project;
+  if (id === "upload") return `${fmtClock(p.duration, 0)} · ${p.original_filename}`;
+  if (id === "tempo") return p.detected_bpm ? `${Math.round(p.detected_bpm * 10) / 10} BPM` : "";
+  if (id === "midi") {
+    if (status === "done" && hasMultitrack()) return `${p.multitrack.length} faixas`;
+    if (status === "skipped") return "projeto com stems (Demucs)";
+    if (status === "running") return onDevice("na GPU, costuma levar 1–3 min", "na CPU, pode levar vários minutos");
+    return "uma faixa por instrumento";
+  }
+  if (id === "stems") {
+    const n = Object.keys(p.stems || {}).length;
+    if (status === "done" && n) return `${n} stems: ${Object.keys(p.stems).join(", ")}`;
+    if (status === "running") return onDevice("na GPU, costuma levar 1–2 min", "na CPU, pode levar vários minutos");
+    return "voz, baixo, guitarra, bateria... em faixas de áudio";
+  }
+  if (id === "tags") {
+    if (status === "waiting") return "diga qual parte da música é cada estrofe, ou pule";
+    if (status === "done") return PL.jobs[p.job_id].tagsNote || "partes marcadas";
+    if (status === "skipped") return PL.jobs[p.job_id].tagsNote || "pulada";
+    return "verso, refrão, ponte... em cada estrofe";
+  }
+  if (id === "intro") {
+    if (status === "done") return PL.jobs[p.job_id].introNote || "partes marcadas";
+    if (status === "skipped") return "sem letra sincronizada para achar as partes";
+    if (status === "running") return "criando as partes na linha do tempo...";
+    return PL.jobs[p.job_id].steps.tags === "skipped" ? "a intro: do começo até a primeira estrofe"
+      : "intro, versos, refrões, solo... na linha do tempo";
+  }
+  if (id === "sync") {
+    const job = PL.jobs[p.job_id];
+    if (status === "running") return onDevice("ouvindo a voz, costuma levar 1–2 min",
+      "ouvindo a voz na CPU, pode levar mais de 10 min");
+    if (status === "done") return job.syncNote || "letra sincronizada";
+    if (status === "skipped") return "sem letra para sincronizar";
+    return "cada palavra no tempo em que é cantada, com os acordes em cima";
+  }
+  if (id === "lyrics") {
+    const job = PL.jobs[p.job_id];
+    if (status === "running") return "pesquisando no Genius...";
+    if (status === "waiting") return `${job.lyricsResults.length === 1 ? "1 letra encontrada" : `${job.lyricsResults.length} letras encontradas`} para "${job.lyricsQuery}": confirme abaixo`;
+    if (status === "done") return job.lyricsNote || "letra escolhida";
+    if (status === "skipped") return job.lyricsNote || "pulada";
+    return "busca pelo nome exato da música";
+  }
+  if (id === "harmony") return status === "running" ? "costuma levar de 10 a 40 s" : "tom, campo harmônico e acordes";
+  return "";
+}
+
+function renderPipeline() {
+  const p = state.project;
+  const job = p && PL.jobs[p.job_id];
+  if (!job) return;
+  const list = $("pipelineSteps");
+  list.innerHTML = "";
+  PL_STEPS.forEach((s, i) => {
+    const status = job.steps[s.id];
+    const mark = status === "done" ? "✓" : status === "skipped" ? "–" : status === "error" ? "!" : status === "waiting" ? "?" : String(i + 1);
+    const li = el("li", { class: `pl-step is-${status}` },
+      el("span", { class: "pl-mark", "aria-hidden": "true" }, mark),
+      el("div", { class: "pl-body" },
+        el("strong", {}, s.label, s.hint ? el("span", { class: "pl-hint" }, ` · ${s.hint}`) : null),
+        el("span", { class: "muted small" }, stepDetail(s.id, status)),
+        status === "running" ? el("span", { class: "pl-clock small", "data-clock": "1" }) : null,
+        status === "running" ? el("div", { class: "pl-downloads hidden", "data-downloads": "1" }) : null));
+    if (status === "running") li.setAttribute("aria-current", "step");
+    list.append(li);
+  });
+  const finished = PL_STEPS.filter((s) => ["done", "skipped"].includes(job.steps[s.id])).length;
+  $("pipelineBarFill").style.width = `${Math.round((finished / PL_STEPS.length) * 100)}%`;
+
+  const note = $("pipelineNote");
+  note.innerHTML = "";
+  renderPipelineLyricsChoice(job, p.job_id);
+  if (job.steps.tags === "waiting") {
+    const box = $("pipelineChoice");
+    box.innerHTML = "";
+    show(box);
+    box.append(
+      el("strong", { class: "small" }, "A letra já está sincronizada. Quer marcar as partes de cada estrofe?"),
+      el("p", { class: "muted small" }, "As partes viram a estrutura da música e os títulos da cifra. Os trechos sem letra (solo, breakdown...) são inferidos pela própria música."),
+      el("div", { class: "row-inline" },
+        el("button", { type: "button", class: "btn-primary btn-small", onclick: () => pipelineOpenTags(p.job_id) }, "🏷 Marcar partes"),
+        el("button", { type: "button", class: "btn-outline btn-small", onclick: () => pipelineTagsDone(p.job_id, null) }, "Pular")));
+    note.textContent = "Falta pouco: depois disso as partes vão para a linha do tempo e o player abre.";
+  } else if (job.steps.lyrics === "waiting") {
+    note.textContent = "A música já está analisada. Escolha a letra certa: em seguida ela é sincronizada com a voz. Ou pule esta etapa.";
+  } else if (job.error) {
+    note.append(
+      el("span", { class: "pl-error" }, `Erro: ${job.error}`), " ",
+      el("button", { type: "button", class: "btn-primary btn-small", onclick: () => { runPipeline(p.job_id); renderPipeline(); } }, "Tentar de novo"), " ",
+      el("button", { type: "button", class: "btn-outline btn-small", onclick: () => { delete PL.jobs[p.job_id]; clearInterval(PL.timer); showPipeline(false); renderProjectView(); } }, "Abrir sem esta etapa"));
+  } else {
+    note.textContent = "Quando terminar, o player abre com os acordes da música. Você pode sair desta tela: o processamento continua.";
+  }
+  renderModelDownloads();
+  renderPipelineClock();
+}
+
+function renderPipelineClock() {
+  const p = state.project;
+  const job = p && PL.jobs[p.job_id];
+  if (!job || state.view !== "project") return;
+  const fmt = (ms) => fmtClock(Math.floor(ms / 1000), 0);
+  $("pipelineElapsed").textContent = job.error ? "" : `${fmt(Date.now() - job.startedAt)} no total`;
+  const clock = document.querySelector("#pipelineSteps [data-clock]");
+  if (clock) clock.textContent = fmt(Date.now() - job.stepStartedAt);
+  if (Object.values(job.steps).includes("running")) pollModelDownloads();
+  else if (PL.downloads.length) { PL.downloads = []; renderModelDownloads(); }
+}
+
+// ---------- model downloads (first run of Whisper / Demucs / Dettato: hundreds of MB) ----------
+
+PL.downloads = [];
+PL.dlPolling = false;
+const DL_MIN_BYTES = 1e6;  // config files and other tiny downloads are not worth a bar
+
+async function pollModelDownloads() {
+  if (PL.dlPolling) return;
+  PL.dlPolling = true;
+  try {
+    const { downloads } = await api("/api/downloads");
+    PL.downloads = (downloads || []).filter((d) => !d.total || d.total >= DL_MIN_BYTES);
+  } catch {
+    PL.downloads = [];
+  } finally {
+    PL.dlPolling = false;
+  }
+  renderModelDownloads();
+}
+
+function fmtBytes(n) {
+  if (n >= 1e9) return `${(n / 1e9).toFixed(2)} GB`;
+  if (n >= 1e6) return `${(n / 1e6).toFixed(n >= 1e8 ? 0 : 1)} MB`;
+  return `${Math.round(n / 1e3)} KB`;
+}
+
+/** A bar per model being downloaded, under the running step of the processing card. */
+function renderModelDownloads() {
+  const box = document.querySelector("#pipelineSteps [data-downloads]");
+  if (!box) return;
+  box.innerHTML = "";
+  show(box, PL.downloads.length > 0);
+  for (const d of PL.downloads) {
+    const pct = d.total ? Math.min(100, (d.downloaded / d.total) * 100) : null;
+    const eta = d.total && d.speed > 0 && !d.done ? (d.total - d.downloaded) / d.speed : null;
+    const title = d.error ? `Falha ao baixar o modelo ${d.label}`
+      : d.done ? `Modelo ${d.label} baixado`
+      : `Baixando o modelo ${d.label} (só na primeira vez)`;
+    const info = d.error ? "tentando de outro jeito, sem barra de progresso..." : [
+      d.total ? `${fmtBytes(d.downloaded)} de ${fmtBytes(d.total)}` : fmtBytes(d.downloaded),
+      pct !== null ? `${Math.floor(pct)}%` : null,
+      !d.done && d.speed > 0 ? `${fmtBytes(d.speed)}/s` : null,
+      eta !== null ? `falta ~${fmtClock(Math.ceil(eta), 0)}` : null,
+    ].filter(Boolean).join(" · ");
+    box.append(el("div", { class: `pl-dl${d.done ? " is-done" : ""}${d.error ? " is-error" : ""}` },
+      el("div", { class: "pl-dl-head small" },
+        el("strong", {}, `⬇ ${title}`),
+        el("span", { class: "muted" }, info)),
+      el("div", {
+        class: `pl-dl-bar${pct === null && !d.done ? " is-indeterminate" : ""}`,
+        role: "progressbar", "aria-label": title, "aria-valuemin": "0", "aria-valuemax": "100",
+        "aria-valuenow": pct !== null ? String(Math.floor(pct)) : null,
+      }, el("span", { style: `width: ${d.done ? 100 : pct ?? 30}%` }))));
   }
 }
 
@@ -311,6 +793,14 @@ function stopAllAudio() {
   destroyWave(partWave);
   projWave = partWave = null;
   if (typeof mpReset === "function") mpReset();
+  if (scaleAudio) {
+    try {
+      scaleAudio.close();
+    } catch {
+      /* ignore */
+    }
+    scaleAudio = null;
+  }
   if (alphaTabApi) {
     alphaTabApi.destroy();
     alphaTabApi = null;
@@ -393,26 +883,22 @@ async function deleteProject(p) {
   }
 }
 
-function selectedAnalysis() {
-  return els.newProjectForm.querySelector("input[name=analysis]:checked").value;
-}
-els.newProjectForm.querySelectorAll("input[name=analysis]").forEach((r) =>
-  r.addEventListener("change", () => {
-    document.querySelectorAll(".classic-only").forEach((x) => show(x, selectedAnalysis() === "classic"));
-  }));
-
 els.audioFileInput.addEventListener("change", () => {
   const f = els.audioFileInput.files[0];
   els.fileNameDisplay.textContent = f ? f.name : "Arraste um MP3/WAV/FLAC ou clique para selecionar";
-  if (f && !els.projectNameInput.value) els.projectNameInput.placeholder = f.name.replace(/\.[^.]+$/, "").replace(/_+/g, " ");
+  // fill the name from the file, unless the user already typed one of their own
+  const input = els.projectNameInput;
+  if (f && (!input.value || input.dataset.auto === "1")) {
+    input.value = songNameFromFile(f.name);
+    input.dataset.auto = "1";
+  }
 });
+els.projectNameInput.addEventListener("input", () => { delete els.projectNameInput.dataset.auto; });
 
 els.newProjectForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   const file = els.audioFileInput.files[0];
   if (!file || state.busy) return;
-  const mode = selectedAnalysis();
-  const isolated = mode === "classic" && els.isolatedStemCheck.checked;
   setBusy(true);
   els.createProjectBtn.disabled = true;
   banner(els.uploadStatus, "Enviando o áudio e detectando o andamento...", "busy");
@@ -420,20 +906,16 @@ els.newProjectForm.addEventListener("submit", async (e) => {
     const form = new FormData();
     form.append("file", file);
     form.append("name", els.projectNameInput.value);
-    form.append("mode", mode);
-    form.append("is_isolated_stem", isolated ? "true" : "false");
+    form.append("mode", "dettato");
     const project = await api("/api/projects", { method: "POST", body: form });
     els.newProjectForm.reset();
+    delete els.projectNameInput.dataset.auto;
     els.fileNameDisplay.textContent = "Arraste um MP3/WAV/FLAC ou clique para selecionar";
     hide(els.uploadStatus);
     state.project = project;
     state.peaks = null;
     navigate(`#/p/${project.job_id}`);
-    // the analysis runs in the project view, so the waveform is usable meanwhile
-    setTimeout(() => {
-      if (mode === "dettato") runMultitrack();
-      else if (!isolated) runSeparate(els.demucsModelSelect.value);
-    }, 0);
+    // the project view runs the processing pipeline (MIDI → harmony) before showing the player
   } catch (err) {
     banner(els.uploadStatus, `Erro: ${err.message}`, "error");
   } finally {
@@ -458,6 +940,7 @@ function audioSources() {
   return out;
 }
 function sourceUrl(stem) {
+  if (stem && stem.includes("+")) return projectUrl(`/mix?stems=${encodeURIComponent(stem.split("+").join(","))}`);
   return fileUrl(stem ? state.project.stems[stem] : state.project.input_path);
 }
 function fillSourceSelect(select, value) {
@@ -598,6 +1081,9 @@ function snapTime(t) {
 
 async function renderProjectView() {
   const p = state.project;
+  PE.active = false;
+  PE.disableDrag = null;
+  hide(peEls.panel);
   hide(els.projectStatus);
   restoreTab();
   els.projNameInput.value = p.name;
@@ -605,7 +1091,9 @@ async function renderProjectView() {
   els.projMeta.textContent = `${fmtClock(p.duration, 0)} · ${p.original_filename}`;
   renderAnalysis();
   renderPartList();
-  fillSourceSelect(els.projSource, "");
+  SRC.open = false;
+  hide(srcEls.menu);
+  setProjSource("");
   hide(els.draftPanel);
   setProjRate(100);
   sel.cur = null;
@@ -622,6 +1110,7 @@ async function renderProjectView() {
     syncPartLane();
     navPlayhead(t);
     updateSheet(t);
+    lyricOverlayNow(t);
   };
   $("projTimeTotal").textContent = fmtClock(p.duration);
   $("projBpmLcd").textContent = p.detected_bpm ? String(Math.round(p.detected_bpm * 10) / 10) : "–";
@@ -640,8 +1129,12 @@ async function renderProjectView() {
     navUpdate();
   });
   w.ws.on("seeking", (t) => {
-    updateNowChord(t);
+    updateNowChord(t, false, CU.project);
+    syncChordLane(CU.project);
+    syncPartLane();
+    navPlayhead(t);
     updateSheet(t);
+    lyricOverlayNow(t);
   });
   // a click on the waveform outside the selected section deselects it (a new part being drawn stays)
   w.onInteraction = (t) => {
@@ -651,15 +1144,22 @@ async function renderProjectView() {
   whenReady(w, () => {
     if (projWave !== w) return;
     drawPartRegions();
-    w.regions.enableDragSelection({ color: DRAFT_COLOR });
+    PE.disableDrag = w.regions.enableDragSelection({ color: DRAFT_COLOR });
     syncChordLane(CU.project);
     navAttach(w);
   });
+  renderLyricOverlay();
   loadHarmony();
   loadLyrics();
   attachSelectionHint(w);
   // resizing / moving the part being drawn: live start–end next to the pointer
   w.regions.on("region-update", (region, side) => {
+    if (PE.active && region.id.startsWith("part-")) {
+      peRegionMoved(region, false);
+      const ev = selHint.lastEvent;
+      if (ev) showSelHint(ev.clientX, ev.clientY, region.start, region.end, side);
+      return;
+    }
     if (region !== w.draft) return;
     const ev = selHint.lastEvent;
     if (ev) showSelHint(ev.clientX, ev.clientY, snapTime(region.start), snapTime(region.end), side);
@@ -673,6 +1173,10 @@ async function renderProjectView() {
     setSelection(draftSelection());
   });
   w.regions.on("region-updated", (region) => {
+    if (PE.active && region.id.startsWith("part-")) {
+      peRegionMoved(region, true);  // the edge that moved snaps to the beat (when "encaixar" is on)
+      return;
+    }
     if (region === w.draft) {
       snapDraft();
       showDraft();
@@ -767,14 +1271,15 @@ function drawPartRegions() {
   if (!w) return;
   w.regions.getRegions().filter((r) => r.id.startsWith("part-")).forEach((r) => r.remove());
   for (const part of state.project.parts) {
+    const r = peRange(part);
     w.regions.addRegion({
       id: `part-${part.part_id}`,
-      start: part.start,
-      end: part.end,
+      start: r.start,
+      end: r.end,
       color: withAlpha(partColor(part), 0.22),
       content: part.name,
       drag: false,
-      resize: false,
+      resize: PE.active,
     });
   }
   renderPartLane();
@@ -789,18 +1294,26 @@ function renderPartLane() {
   show(lane, parts.length > 0);
   const dur = (state.peaks && state.peaks.duration) || state.project.duration || 1;
   for (const part of parts) {
+    const r = peRange(part);
     inner.append(el("button", {
       type: "button",
-      class: "lane-part",
-      style: `left:${(part.start / dur) * 100}%;width:${((part.end - part.start) / dur) * 100}%;--part-color:${partColor(part)}`,
-      title: `${part.name} · ${fmtRange(part.start, part.end)}\nClique: seleciona e vai para o início · Dois cliques: abre a parte`,
+      class: "lane-part" + (PE.active && PE.focus === part.part_id ? " is-editing" : ""),
+      style: `left:${(r.start / dur) * 100}%;width:${((r.end - r.start) / dur) * 100}%;--part-color:${partColor(part)}`,
+      title: `${part.name} · ${fmtRange(part.start, part.end)}\nClique: seleciona e vai para o início · Clique de novo: limpa a seleção · Dois cliques: abre a parte`,
       dataset: { partId: part.part_id },
+      // click selects the part (and goes to its start); a click on the selected part clears it.
+      // While the boundaries are being edited a click only moves the focus.
       onclick: () => {
-        if (!(sel.cur && sel.cur.partId === part.part_id)) setSelection(partSelection(part));
-        if (projWave) projWave.ws.setTime(part.start);
+        const selected = !!sel.cur && sel.cur.partId === part.part_id;
+        if (selected && !PE.active) {
+          setSelection(null);
+          return;
+        }
+        if (!selected) setSelection(partSelection(part));
+        if (projWave) projWave.ws.setTime(peRange(part).start);
       },
       ondblclick: () => navigate(`#/p/${state.project.job_id}/part/${part.part_id}`),
-    }, part.name));
+    }, PE.active ? peName(part.part_id) : part.name));
   }
   styleSelection();
   syncPartLane();
@@ -816,7 +1329,90 @@ function syncPartLane() {
   const scroller = wrap.parentElement;
   inner.style.width = `${wrap.scrollWidth}px`;
   inner.style.transform = `translateX(${-(scroller ? scroller.scrollLeft : 0)}px)`;
+  syncLyricOverlay();
 }
+
+// ---------- synced lyrics drawn over the waveform ----------
+// Each sung line sits at its time (it may run on until the next line starts) and follows the
+// zoom and the horizontal scroll, like the part and chord lanes. The line being sung is lit.
+
+const LO = { on: true, lines: [], nodes: [], cur: -1, laidW: 0 };
+const loEls = { box: $("lyricOverlay"), inner: $("lyricOverlayInner"), btn: $("navLyricsBtn") };
+const LO_MIN_PX = 26;  // narrower than this (zoomed out) the line is hidden instead of a lone "…"
+try {
+  LO.on = localStorage.getItem("escritab.waveLyrics") !== "off";
+} catch {
+  /* private mode */
+}
+
+function renderLyricOverlay() {
+  const ly = lyricsIsCurrent() && L.data && L.data.lyrics;
+  LO.lines = ly ? ly.lines : [];
+  LO.nodes = [];
+  LO.cur = -1;
+  LO.laidW = 0;
+  loEls.inner.innerHTML = "";
+  show(loEls.btn, LO.lines.length > 0);
+  loEls.btn.classList.toggle("is-on", LO.on);
+  loEls.btn.setAttribute("aria-pressed", String(LO.on));
+  show(loEls.box, LO.on && LO.lines.length > 0);
+  if (!LO.lines.length || !state.project) return;
+  const dur = (state.peaks && state.peaks.duration) || state.project.duration || 1;
+  LO.lines.forEach((line, i) => {
+    const next = LO.lines[i + 1];
+    const until = Math.max(line.end, Math.min(next ? next.start : dur, line.end + 6));
+    const text = line.words.map((w) => w.text).join(" ");
+    const node = el("span", {
+      class: "lo-line",
+      style: `left:${(line.start / dur) * 100}%;width:${((until - line.start) / dur) * 100}%`,
+    }, text);
+    loEls.inner.append(node);
+    LO.nodes.push({ node, frac: (until - line.start) / dur });
+  });
+  syncLyricOverlay();
+  if (projWave) lyricOverlayNow(projWave.ws.getCurrentTime());
+}
+
+/** Follow the waveform's zoom / scroll; hide lines too narrow to read at this zoom. */
+function syncLyricOverlay() {
+  const w = projWave;
+  const wrap = w && w.ws.getWrapper();
+  if (!wrap || !LO.nodes.length) return;
+  const width = wrap.scrollWidth;
+  loEls.inner.style.width = `${width}px`;
+  loEls.inner.style.transform = `translateX(${-(wrap.parentElement ? wrap.parentElement.scrollLeft : 0)}px)`;
+  if (width !== LO.laidW) {
+    LO.laidW = width;
+    for (const n of LO.nodes) n.node.classList.toggle("tiny", n.frac * width < LO_MIN_PX);
+  }
+}
+
+/** Light the line being sung at time t. */
+function lyricOverlayNow(t) {
+  if (!LO.nodes.length) return;
+  let lo = 0;
+  let hi = LO.lines.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (LO.lines[mid].start <= t + 0.05) lo = mid + 1;
+    else hi = mid;
+  }
+  const idx = lo - 1 >= 0 && t <= LO.lines[lo - 1].end + 0.6 ? lo - 1 : -1;
+  if (idx === LO.cur) return;
+  if (LO.cur >= 0 && LO.nodes[LO.cur]) LO.nodes[LO.cur].node.classList.remove("now");
+  if (idx >= 0) LO.nodes[idx].node.classList.add("now");
+  LO.cur = idx;
+}
+
+loEls.btn.addEventListener("click", () => {
+  LO.on = !LO.on;
+  try {
+    localStorage.setItem("escritab.waveLyrics", LO.on ? "on" : "off");
+  } catch {
+    /* private mode */
+  }
+  renderLyricOverlay();
+});
 
 // ---------- DAW-style navigation: time ruler + overview scrollbar with zoom handles ----------
 //
@@ -1294,6 +1890,16 @@ function draftSelection() {
 }
 
 function setSelection(s) {
+  // selecting something else leaves the fine-tuning of a part (unsaved changes are dropped)
+  if (PE.active && s && s.kind === "part") {
+    if (s.partId !== PE.focus && PE.cur[s.partId]) {
+      PE.focus = s.partId;
+      s = { ...s, ...PE.cur[s.partId] };
+      setTimeout(renderPartEdit, 0);
+    }
+  } else if (PE.active && s) {
+    leavePartEdit(true);
+  }
   sel.cur = s;
   applyLoop();
   styleSelection();
@@ -1365,6 +1971,7 @@ function renderSelectionBar() {
   els.loopToggle.classList.toggle("is-disabled", !s);
   els.loopToggle.classList.toggle("active", !!s && els.loopCheck.checked);
   show(els.selClearBtn, !!s);
+  show($("partEditBtn"), !!s && s.kind === "part" && !peEditing());
 }
 
 els.loopCheck.addEventListener("change", () => {
@@ -1374,6 +1981,377 @@ els.loopCheck.addEventListener("change", () => {
 els.selClearBtn.addEventListener("click", () => {
   if (sel.cur && sel.cur.kind === "draft") discardDraft();
   else setSelection(null);
+});
+
+// ---------- project: edit the parts' boundaries on the timeline ----------
+// "Ajustar" turns every part's edges into handles. Dragging the boundary two parts share moves
+// both of them live (waveform + part lane); the panel fine-tunes the focused part. Saving sends
+// every part that changed.
+
+const PE = {
+  active: false,
+  focus: null,   // part_id shown in the panel
+  orig: {},      // part_id -> {start, end} saved
+  cur: {},       // part_id -> {start, end} being edited
+  disableDrag: null,
+};
+const peEls = {
+  panel: $("partEditPanel"),
+  name: $("peName"),
+  nameInput: $("peNameInput"),
+  start: $("peStart"),
+  end: $("peEnd"),
+  range: $("peRange"),
+  neighborsRow: $("peNeighborsRow"),
+  neighbors: $("peNeighbors"),
+  neighborsLabel: $("peNeighborsLabel"),
+  warn: $("peWarn"),
+};
+const PE_TOUCH_S = 0.15;  // parts this close share a boundary (they move together)
+const PE_MIN_S = 0.1;
+
+function partRegion(partId) {
+  return projWave && projWave.regions.getRegions().find((r) => r.id === `part-${partId}`);
+}
+function peEditing() {
+  return PE.active;
+}
+function peRange(part) {
+  return PE.active && PE.cur[part.part_id] ? PE.cur[part.part_id] : part;
+}
+function peTimesChanged(id) {
+  const a = PE.cur[id];
+  const b = PE.orig[id];
+  return !!a && !!b && (Math.abs(a.start - b.start) > 0.005 || Math.abs(a.end - b.end) > 0.005);
+}
+function peNameChanged(id) {
+  const a = PE.cur[id];
+  const b = PE.orig[id];
+  return !!a && !!b && a.name.trim() !== b.name;
+}
+function peChanged(id) {
+  return peTimesChanged(id) || peNameChanged(id);
+}
+/** The name shown for a part while editing (the typed one, or the saved one while blank). */
+function peName(id) {
+  const r = PE.active && PE.cur[id];
+  return (r && r.name.trim()) || partById(id).name;
+}
+/** The parts glued to ``id``'s start / end (sharing that boundary right now). */
+function peNeighbors(id) {
+  const me = PE.cur[id];
+  let prev = null;
+  let next = null;
+  for (const [other, r] of Object.entries(PE.cur)) {
+    if (other === id) continue;
+    if (!prev && Math.abs(r.end - me.start) < PE_TOUCH_S) prev = other;
+    if (!next && Math.abs(r.start - me.end) < PE_TOUCH_S) next = other;
+  }
+  return { prev, next };
+}
+function partById(id) {
+  return state.project.parts.find((p) => p.part_id === id);
+}
+
+function startPartEdit(part) {
+  if (!projWave) return;
+  if (projWave.draft) discardDraft();
+  if (!PE.active) {
+    PE.active = true;
+    PE.orig = {};
+    PE.cur = {};
+    for (const p of state.project.parts) {
+      PE.orig[p.part_id] = { start: p.start, end: p.end, name: p.name };
+      PE.cur[p.part_id] = { start: p.start, end: p.end, name: p.name };
+    }
+    for (const p of state.project.parts) {
+      const region = partRegion(p.part_id);
+      if (region) region.setOptions({ resize: true });
+    }
+    if (PE.disableDrag) PE.disableDrag();  // no new section drawn while editing the boundaries
+    PE.disableDrag = null;
+    $("projWave").classList.add("pe-mode");
+    show(peEls.panel);
+  }
+  peFocus(part.part_id);
+}
+
+function peFocus(id) {
+  PE.focus = id;
+  const part = partById(id);
+  if (part && !(sel.cur && sel.cur.partId === id)) setSelection({ ...partSelection(part), ...PE.cur[id] });
+  renderPartEdit();
+}
+
+function renderPartEdit() {
+  if (!PE.active) return;
+  const part = partById(PE.focus);
+  const r = PE.cur[PE.focus];
+  if (!part || !r) return;
+  peEls.name.textContent = `"${peName(PE.focus)}"`;
+  if (document.activeElement !== peEls.nameInput) peEls.nameInput.value = r.name;
+  const blank = !r.name.trim();
+  peEls.nameInput.classList.toggle("invalid", blank);
+  if (document.activeElement !== peEls.start) peEls.start.value = fmtClock(r.start, 2);
+  if (document.activeElement !== peEls.end) peEls.end.value = fmtClock(r.end, 2);
+  peEls.start.classList.remove("invalid");
+  peEls.end.classList.remove("invalid");
+  const o = PE.orig[PE.focus];
+  peEls.range.textContent = `duração ${(r.end - r.start).toFixed(2)} s`
+    + (peTimesChanged(PE.focus) ? ` · antes ${fmtClock(o.start, 2)}–${fmtClock(o.end, 2)}` : "");
+  const { prev, next } = peNeighbors(PE.focus);
+  const names = [prev && `"${peName(prev)}"`, next && `"${peName(next)}"`].filter(Boolean);
+  show(peEls.neighborsRow, true);
+  peEls.neighborsLabel.textContent = names.length
+    ? `Partes coladas se movem juntas (${names.join(" e ")}): sem buraco nem sobreposição`
+    : "Partes coladas se movem juntas: sem buraco nem sobreposição";
+  const changed = Object.keys(PE.cur).filter(peChanged);
+  const withTab = changed.filter(peTimesChanged).map(partById)
+    .filter((p) => p && p.artifacts.musicxml).map((p) => peName(p.part_id));
+  const label = (id) => (peNameChanged(id) ? `${PE.orig[id].name} → ${peName(id)}` : peName(id));
+  const parts = changed.length ? `${changed.length} parte(s) alterada(s): ${changed.map(label).join(", ")}.` : "";
+  const blankAny = Object.values(PE.cur).some((x) => !x.name.trim());
+  peEls.warn.textContent = [parts,
+    withTab.length ? `A tablatura de ${withTab.join(", ")} vai precisar ser gerada de novo.` : "",
+    blankAny ? "Toda parte precisa de um nome." : ""].filter(Boolean).join(" ");
+  show(peEls.warn, changed.length > 0 || blankAny);
+  $("peSaveBtn").disabled = !changed.length || blankAny;
+  $("peSaveBtn").textContent = changed.length > 1 ? `Salvar ${changed.length} partes` : "Salvar";
+  if (sel.cur && sel.cur.partId === PE.focus) {
+    sel.cur = { ...sel.cur, start: r.start, end: r.end };
+    applyLoop();
+    renderSelectionBar();
+  }
+}
+
+/** Moves one edge of a part (and the glued neighbour's edge with it). Returns false if invalid. */
+function moveEdge(id, which, value) {
+  if (!PE.active || !Number.isFinite(value) || !PE.cur[id]) return false;
+  const dur = projWave.ws.getDuration() || state.project.duration || 0;
+  const me = PE.cur[id];
+  const glue = peEls.neighbors.checked;
+  const { prev, next } = peNeighbors(id);
+  if (which === "start") {
+    const floor = glue && prev ? PE.cur[prev].start + PE_MIN_S : 0;
+    me.start = Math.max(floor, Math.min(value, me.end - PE_MIN_S));
+    if (glue && prev) PE.cur[prev].end = me.start;
+  } else {
+    const ceil = glue && next ? PE.cur[next].end - PE_MIN_S : dur;
+    me.end = Math.min(ceil, Math.max(value, me.start + PE_MIN_S));
+    if (glue && next) PE.cur[next].start = me.end;
+  }
+  for (const pid of [id, glue && which === "start" ? prev : null, glue && which === "end" ? next : null]) {
+    if (!pid) continue;
+    const region = partRegion(pid);
+    const r = PE.cur[pid];
+    if (region && (Math.abs(region.start - r.start) > 1e-4 || Math.abs(region.end - r.end) > 1e-4)) {
+      region.setOptions({ start: r.start, end: r.end });
+    }
+  }
+  renderPartLane();
+  if (PE.focus !== id) peFocus(id);
+  else renderPartEdit();
+  return true;
+}
+
+/** A part region's edge was dragged on the waveform (live, or at the end with the beat snap). */
+function peRegionMoved(region, done) {
+  const id = region.id.slice(5);
+  const r = PE.cur[id];
+  if (!r) return;
+  const snap = (t) => (done ? snapTime(t) : t);
+  if (Math.abs(region.start - r.start) > 1e-4) moveEdge(id, "start", snap(region.start));
+  if (Math.abs(region.end - r.end) > 1e-4) moveEdge(id, "end", snap(region.end));
+}
+
+function leavePartEdit(restore) {
+  if (!PE.active) return;
+  PE.active = false;
+  for (const p of state.project.parts) {
+    const region = partRegion(p.part_id);
+    if (!region) continue;
+    region.setOptions(restore ? { start: p.start, end: p.end, resize: false } : { resize: false });
+  }
+  $("projWave").classList.remove("pe-mode");
+  hide(peEls.panel);
+  if (projWave && !PE.disableDrag) PE.disableDrag = projWave.regions.enableDragSelection({ color: DRAFT_COLOR });
+  renderPartLane();
+}
+
+function cancelPartEdit() {
+  const focus = PE.focus;
+  leavePartEdit(true);
+  const part = focus && partById(focus);
+  if (part && sel.cur && sel.cur.partId === focus) setSelection(partSelection(part));
+  else renderSelectionBar();
+}
+
+async function savePartEdit() {
+  if (!PE.active || state.busy) return;
+  const projectId = state.project.job_id;
+  const changed = Object.keys(PE.cur).filter(peChanged);
+  if (!changed.length || Object.values(PE.cur).some((x) => !x.name.trim())) return;
+  setBusy(true);
+  $("peSaveBtn").disabled = true;
+  try {
+    let job = null;
+    let lyricsChanged = false;
+    // shrinking parts first, so a growing neighbour never overlaps them on the way
+    const order = changed.sort((a, b) => {
+      const grow = (id) => (PE.cur[id].end - PE.cur[id].start) - (PE.orig[id].end - PE.orig[id].start);
+      return grow(a) - grow(b);
+    });
+    for (const id of order) {
+      const body = {};
+      if (peTimesChanged(id)) Object.assign(body, { start: PE.cur[id].start, end: PE.cur[id].end });
+      if (peNameChanged(id)) body.name = PE.cur[id].name.trim();
+      const data = await patchJson(`/api/projects/${projectId}/parts/${id}`, body);
+      job = data.job;
+      lyricsChanged = lyricsChanged || !!data.lyrics_changed;
+    }
+    if (!state.project || state.project.job_id !== projectId) return;
+    const focus = PE.focus;
+    state.project = job;
+    if (lyricsChanged) loadLyrics();  // a stanza moved into its part's new bounds
+    leavePartEdit(false);
+    drawPartRegions();
+    renderPartList();
+    renderStructure();
+    const part = partById(focus);
+    if (part) setSelection(partSelection(part));
+  } catch (err) {
+    peEls.warn.textContent = `Não foi possível salvar: ${err.message}`;
+    show(peEls.warn);
+    $("peSaveBtn").disabled = false;
+  } finally {
+    setBusy(false);
+  }
+}
+
+$("partEditBtn").addEventListener("click", () => {
+  const part = sel.cur && sel.cur.kind === "part" && partById(sel.cur.partId);
+  if (part) startPartEdit(part);
+});
+$("peSaveBtn").addEventListener("click", savePartEdit);
+$("peCancelBtn").addEventListener("click", cancelPartEdit);
+$("pePlayBtn").addEventListener("click", () => {
+  if (!PE.active) return;
+  const part = partById(PE.focus);
+  if (part) playSelectionLoop({ ...partSelection(part), ...PE.cur[PE.focus] });
+});
+peEls.neighbors.addEventListener("change", renderPartEdit);
+peEls.nameInput.addEventListener("input", () => {
+  if (!PE.active || !PE.cur[PE.focus]) return;
+  PE.cur[PE.focus].name = peEls.nameInput.value;
+  renderPartLane();  // the new name shows on the lane right away
+  renderPartEdit();
+});
+peEls.nameInput.addEventListener("keydown", (e) => {
+  if (!PE.active) return;
+  if (e.key === "Enter") {
+    e.preventDefault();
+    savePartEdit();
+  } else if (e.key === "Escape") {  // back to the saved name
+    PE.cur[PE.focus].name = PE.orig[PE.focus].name;
+    peEls.nameInput.blur();
+    renderPartLane();
+    renderPartEdit();
+  }
+});
+peEls.panel.addEventListener("click", (e) => {
+  const nudge = e.target.closest("[data-pe]");
+  if (nudge) {
+    const which = nudge.dataset.pe;
+    moveEdge(PE.focus, which, PE.cur[PE.focus][which] + Number(nudge.dataset.step) * (e.shiftKey ? 10 : 1));
+    return;
+  }
+  const here = e.target.closest("[data-pe-here]");
+  if (here && projWave) moveEdge(PE.focus, here.dataset.peHere, projWave.ws.getCurrentTime());
+});
+for (const [input, which] of [[peEls.start, "start"], [peEls.end, "end"]]) {
+  const commit = () => {
+    const ok = moveEdge(PE.focus, which, parseClock(input.value));
+    input.classList.toggle("invalid", !ok);
+    if (ok) input.value = fmtClock(PE.cur[PE.focus][which], 2);
+  };
+  input.addEventListener("change", commit);
+  input.addEventListener("blur", () => { if (!input.classList.contains("invalid")) renderPartEdit(); });
+  input.addEventListener("keydown", (e) => {
+    if (!PE.active) return;
+    if (e.key === "Enter") {
+      e.preventDefault();
+      commit();
+    } else if (e.key === "Escape") {
+      input.blur();
+      renderPartEdit();
+    } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+      e.preventDefault();
+      const step = (e.shiftKey ? 1 : 0.1) * (e.key === "ArrowUp" ? 1 : -1);
+      const cur = parseClock(input.value);
+      moveEdge(PE.focus, which, (Number.isFinite(cur) ? cur : PE.cur[PE.focus][which]) + step);
+      input.value = fmtClock(PE.cur[PE.focus][which], 2);
+    }
+  });
+}
+
+// ---------- new part that fits into the timeline ----------
+
+/** What saving the draft with "encaixar" would do to the existing parts (same rules as the server). */
+function draftFitPlan(start, end) {
+  const plan = [];
+  for (const p of state.project.parts) {
+    if (p.end <= start + 1e-3 || p.start >= end - 1e-3) continue;
+    const tab = p.artifacts && p.artifacts.musicxml ? " (a tablatura dela será refeita)" : "";
+    if (p.start < start && p.end > end) {
+      plan.push(`${p.name} será dividida: ${fmtClock(p.start)}–${fmtClock(start)} e ${fmtClock(end)}–${fmtClock(p.end)}${tab}`);
+    } else if (p.start < start) {
+      plan.push(start - p.start < 0.3 ? `${p.name} será removida` : `${p.name} vai terminar em ${fmtClock(start)}${tab}`);
+    } else if (p.end > end) {
+      plan.push(p.end - end < 0.3 ? `${p.name} será removida` : `${p.name} vai começar em ${fmtClock(end)}${tab}`);
+    } else {
+      plan.push(`${p.name} será removida (fica dentro da parte nova)`);
+    }
+  }
+  return plan;
+}
+
+function renderDraftFit() {
+  const r = projWave && projWave.draft;
+  const plan = r ? draftFitPlan(r.start, r.end) : [];
+  show($("draftFitBox"), plan.length > 0);
+  const list = $("draftFitList");
+  list.innerHTML = "";
+  for (const line of plan) list.append(el("li", {}, line));
+  list.classList.toggle("is-off", !$("draftFit").checked);
+}
+$("draftFit").addEventListener("change", renderDraftFit);
+
+/** "+ Nova parte": a draft over the selected stretch, or 8 s from the cursor. */
+$("newPartBtn").addEventListener("click", () => {
+  const w = projWave;
+  if (!w) return;
+  if (PE.active) cancelPartEdit();
+  const dur = w.ws.getDuration() || state.project.duration || 0;
+  let start;
+  let end;
+  const t = w.ws.getCurrentTime();
+  if (sel.cur && sel.cur.kind === "part") {
+    // inside the selected part: from the cursor (if it is in the part) up to 8 s, within the part
+    const inside = t > sel.cur.start && t < sel.cur.end - 1;
+    start = inside ? snapTime(t) : sel.cur.start;
+    end = Math.min(sel.cur.end, start + 8);
+  } else if (sel.cur && sel.cur.kind !== "draft") {
+    ({ start, end } = sel.cur);  // a stretch picked from the structure
+  } else {
+    start = snapTime(w.ws.getCurrentTime());
+    end = Math.min(dur, snapTime(start + 8));
+    if (end - start < 1) start = Math.max(0, end - 8);
+  }
+  if (w.draft) w.draft.remove();
+  w.draft = null;
+  els.draftName.value = "";
+  w.regions.addRegion({ start, end, color: DRAFT_COLOR, drag: true, resize: true });  // becomes the draft
+  els.draftPanel.scrollIntoView({ block: "nearest", behavior: "smooth" });
 });
 
 function snapDraft() {
@@ -1397,6 +2375,7 @@ const draftEndInput = $("draftEnd");
 function renderDraftTimes() {
   const r = projWave && projWave.draft;
   if (!r) return;
+  renderDraftFit();
   if (document.activeElement !== draftStartInput) draftStartInput.value = fmtClock(r.start, 2);
   if (document.activeElement !== draftEndInput) draftEndInput.value = fmtClock(r.end, 2);
   draftStartInput.classList.remove("invalid");
@@ -1513,10 +2492,15 @@ els.draftSaveBtn.addEventListener("click", async () => {
   }
   els.draftSaveBtn.disabled = true;
   try {
-    const data = await postJson(projectUrl("/parts"), { name, start: r.start, end: r.end });
+    const fit = !$("draftFitBox").classList.contains("hidden") && $("draftFit").checked;
+    const data = await postJson(projectUrl("/parts"), { name, start: r.start, end: r.end, fit });
     state.project = data.job;
     discardDraft();
-    hide(els.projectStatus);
+    if (data.changes && data.changes.length) {
+      banner(els.projectStatus, `Parte "${name}" criada e encaixada. ${data.changes.join(" · ")}.`);
+    } else hide(els.projectStatus);
+    if (data.lyrics_changed) loadLyrics();  // the stanza moved into its part: new line times
+    renderStructure();
     drawPartRegions();
     renderPartList();
     // the section just saved stays selected (and looping, if it was)
@@ -1551,6 +2535,15 @@ function renderPartList() {
           title: "Ouvir em loop",
           onclick: () => playSelectionLoop(partSelection(part)),
         }, "⟳ Ouvir"),
+        el("button", {
+          type: "button",
+          class: "btn-outline btn-small",
+          title: "Ajustar o começo e o fim",
+          onclick: () => {
+            startPartEdit(part);
+            $("playerCard").scrollIntoView({ block: "nearest", behavior: "smooth" });
+          },
+        }, "✎ Ajustar"),
         el("a", { class: "btn-primary btn-small", href: `#/p/${state.project.job_id}/part/${part.part_id}` },
           ready ? "Estudar →" : "Transcrever →")));
     els.partList.append(row);
@@ -1581,11 +2574,84 @@ els.projStopBtn.addEventListener("click", () => {
   if (w.ws.isPlaying()) w.ws.pause();
   else w.ws.setTime(w.loop ? w.loop.start : 0);
 });
-els.projSource.addEventListener("change", () => {
-  if (!projWave) return;
-  switchSource(projWave, els.projSource.value);
-  // loading another file resets the media element's rate
-  projWave.ws.once("ready", () => projWave && projWave.ws.setPlaybackRate(Number(els.projRate.value) / 100, true));
+// ---------- player audio: the original mix or one or more stems together ----------
+// A source is "" (original mix), a stem name ("guitar") or several joined by "+" ("bass+guitar").
+
+const SRC = { open: false };
+const srcEls = { picker: $("projSourcePicker"), btn: $("projSourceBtn"), menu: $("projSourceMenu") };
+
+function stemNames() {
+  return Object.keys((state.project && state.project.stems) || {});
+}
+function sourceStems(source) {
+  return source ? source.split("+").filter(Boolean) : [];
+}
+function sourceLabel(source) {
+  const stems = sourceStems(source);
+  if (!stems.length) return "Mix original";
+  const all = stemNames();
+  const missing = all.filter((n) => !stems.includes(n));
+  if (all.length > 2 && missing.length === 1) return `Sem ${(STEM_LABELS[missing[0]] || missing[0]).toLowerCase()}`;
+  return stems.map((n) => STEM_LABELS[n] || n).join(" + ");
+}
+
+function setProjSource(source) {
+  const stems = sourceStems(source).filter((n) => stemNames().includes(n)).sort();
+  const value = stems.join("+");
+  srcEls.btn.textContent = sourceLabel(value);
+  srcEls.btn.title = `Tocando: ${sourceLabel(value)}. Clique para escolher a música original ou um ou mais stems juntos.`;
+  renderSourceMenu(value);
+  if (projWave && projWave.stem !== value) {
+    switchSource(projWave, value);
+    // loading another file resets the media element's rate
+    projWave.ws.once("ready", () => projWave && projWave.ws.setPlaybackRate(Number(els.projRate.value) / 100, true));
+  }
+}
+
+function renderSourceMenu(value) {
+  const chosen = sourceStems(value);
+  const names = stemNames();
+  srcEls.menu.innerHTML = "";
+  srcEls.btn.disabled = names.length === 0;
+  const pick = (v) => setProjSource(v);
+  srcEls.menu.append(el("label", { class: "src-opt" },
+    el("input", { type: "radio", name: "srcMode", checked: !chosen.length, onchange: () => pick("") }),
+    el("span", {}, el("strong", {}, "Mix original"), el("small", { class: "muted" }, "a música como foi enviada"))));
+  srcEls.menu.append(el("div", { class: "src-sep" }, "Stems (marque um ou mais)"));
+  for (const n of names) {
+    srcEls.menu.append(el("label", { class: "src-opt" },
+      el("input", {
+        type: "checkbox", checked: chosen.includes(n),
+        onchange: (e) => pick((e.target.checked ? [...chosen, n] : chosen.filter((x) => x !== n)).join("+")),
+      }),
+      el("span", {}, STEM_LABELS[n] || n)));
+  }
+  const without = (x) => names.filter((n) => n !== x).join("+");
+  const quick = [];
+  if (names.includes("vocals") && names.length > 1) quick.push(["Tudo menos a voz", without("vocals")]);
+  if (names.includes("drums") && names.length > 1) quick.push(["Tudo menos a bateria", without("drums")]);
+  if (names.includes("guitar") && names.length > 1) quick.push(["Tudo menos a guitarra", without("guitar")]);
+  if (quick.length) {
+    srcEls.menu.append(el("div", { class: "src-quick" },
+      ...quick.map(([label, v]) => el("button", { type: "button", class: "chip", onclick: () => pick(v) }, label))));
+  }
+  srcEls.menu.append(el("p", { class: "muted small src-note" }, "Vários stems juntos: na primeira vez o servidor leva alguns segundos para mixar."));
+}
+
+function toggleSourceMenu(open = !SRC.open) {
+  SRC.open = open;
+  show(srcEls.menu, open);
+  srcEls.btn.setAttribute("aria-expanded", open ? "true" : "false");
+}
+srcEls.btn.addEventListener("click", () => toggleSourceMenu());
+document.addEventListener("click", (e) => {
+  if (SRC.open && !srcEls.picker.contains(e.target)) toggleSourceMenu(false);
+});
+document.addEventListener("keydown", (e) => {
+  if (SRC.open && e.key === "Escape") {
+    toggleSourceMenu(false);
+    srcEls.btn.focus();
+  }
 });
 
 /** Slower playback keeping the pitch, so the chords still match what you play. */
@@ -1739,7 +2805,7 @@ async function runSeparate(model) {
     if (state.project && state.project.job_id === projectId) {
       state.project = { ...data.job, parts: state.project.parts };
       renderAnalysis();
-      if (state.view === "project") fillSourceSelect(els.projSource, els.projSource.value);
+      if (state.view === "project") setProjSource(projWave ? projWave.stem : "");
     }
     banner(els.analysisStatus, `Stems separadas (${data.device}). Escolha a stem em cada parte, ou ouça-a em "Áudio".`);
   } catch (err) {
@@ -2172,16 +3238,30 @@ async function loadLyrics() {
   L.editing = false;  // opening a project always shows the synced sheet, never a leftover edit
   hide(lEls.status);
   lEls.text.value = "";
+  resetGenius();
   renderLyrics();
   try {
     const data = await api(projectUrl("/lyrics"));
     if (L.projectId !== projectId) return;
     L.data = data;
     L.loaded = true;
+    $("lyricsSaved").textContent = "";
+    if (data.draft && !data.lyrics) {
+      lEls.text.value = data.draft.text;
+      setLang(data.draft.language);
+    }
+    applyLyricsPrefill(projectId);
     renderLyrics();
   } catch (err) {
     banner(lEls.status, `Erro ao carregar a letra: ${err.message}`, "error");
   }
+}
+
+/** Lyrics chosen in the creation pipeline: fill the box and open the tab, ready to align. */
+function applyLyricsPrefill(projectId) {
+  if (L.openLyrics !== projectId) return;
+  L.openLyrics = null;
+  if (L.data && L.data.lyrics) openTab("lyrics");
 }
 
 async function runLyrics(useText) {
@@ -2220,13 +3300,332 @@ lEls.alignBtn.addEventListener("click", () => runLyrics(true));
 lEls.draftBtn.addEventListener("click", () => runLyrics(false));
 lEls.editBtn.addEventListener("click", () => {
   L.editing = true;
-  lEls.text.value = L.data.lyrics.text;
+  lEls.text.value = (L.data.draft && L.data.draft.text) || L.data.lyrics.text;
   renderLyrics();
   lEls.text.focus();
 });
 lEls.cancelBtn.addEventListener("click", () => {
   L.editing = false;
   renderLyrics();
+});
+
+// ---------- lyrics draft: the text is saved in the project before it is aligned ----------
+
+const LD = { timer: null, seq: 0 };
+
+function setLang(code) {
+  if (code && [...lEls.lang.options].some((o) => o.value === code)) lEls.lang.value = code;
+}
+
+/** Saves the lyrics box now (source: where it came from, e.g. "Genius: X · Y"). */
+async function saveLyricsDraft(source) {
+  clearTimeout(LD.timer);
+  if (!state.project || !lyricsIsCurrent()) return;
+  const projectId = state.project.job_id;
+  const seq = ++LD.seq;
+  const text = lEls.text.value;
+  const prev = L.data && L.data.draft;
+  const body = { text, language: lEls.lang.value || null, source: source !== undefined ? source : (prev && prev.source) || null };
+  const saved = $("lyricsSaved");
+  saved.textContent = "salvando...";
+  try {
+    const { draft } = await sendJson("PUT", `/api/projects/${projectId}/lyrics/draft`, body);
+    if (L.data && L.projectId === projectId) L.data.draft = draft;
+    if (seq === LD.seq) saved.textContent = draft ? "✓ rascunho salvo no projeto" : "";
+  } catch (err) {
+    if (seq === LD.seq) saved.textContent = `não foi possível salvar: ${err.message}`;
+  }
+}
+
+/** Typing: save a moment after the last key. */
+function scheduleLyricsDraft() {
+  clearTimeout(LD.timer);
+  $("lyricsSaved").textContent = "";
+  LD.timer = setTimeout(() => saveLyricsDraft(), 800);
+}
+lEls.text.addEventListener("input", scheduleLyricsDraft);
+lEls.lang.addEventListener("change", () => { if (lEls.text.value.trim()) saveLyricsDraft(); });
+
+// ---------- lyrics: tag each stanza with its part (modal) ----------
+
+const TAG_RE = /^\s*\[([^\]]{1,60})\]\s*$/;
+const TAG_PRESETS = ["Intro", "Verso", "Pré-refrão", "Refrão", "Pós-refrão", "Ponte", "Solo", "Instrumental", "Interlúdio", "Outro"];
+const T = {
+  stanzas: [],   // [{tag: string|null, lines: [string]}]
+  cur: -1,       // selected stanza
+};
+const tEls = {
+  dialog: $("tagDialog"),
+  palette: $("tagPalette"),
+  list: $("tagStanzas"),
+  count: $("tagCount"),
+  summary: $("tagSummary"),
+};
+
+/** Text -> stanzas: blank lines split them, a "[Tag]" line names the stanza below it. */
+function parseStanzas(text) {
+  const out = [];
+  let cur = null;
+  const close = () => {
+    if (cur && (cur.lines.length || cur.tag)) out.push(cur);
+    cur = null;
+  };
+  for (const raw of text.replace(/\r\n/g, "\n").split("\n")) {
+    const m = raw.match(TAG_RE);
+    if (m) {
+      if (cur && cur.lines.length) close();
+      cur = { tag: m[1].trim(), lines: cur ? cur.lines : [] };
+      continue;
+    }
+    if (!raw.trim()) {
+      close();  // a tag alone ("[Instrumental]") is a stanza of its own
+      continue;
+    }
+    if (!cur) cur = { tag: null, lines: [] };
+    cur.lines.push(raw.trim());
+  }
+  close();
+  return out;
+}
+
+function stanzasToText(stanzas) {
+  return stanzas.map((s) => [s.tag ? `[${s.tag}]` : null, ...s.lines].filter((x) => x !== null).join("\n")).join("\n\n");
+}
+
+/** "Verso 3" when verses 1 and 2 are taken (by stanzas other than the selected one). */
+function nextVerseLabel() {
+  let max = 0;
+  T.stanzas.forEach((s, i) => {
+    if (i === T.cur || !s.tag) return;
+    const m = s.tag.match(/^(?:verso|verse)\s*(\d+)?/i);
+    if (m) max = Math.max(max, m[1] ? Number(m[1]) : 1);
+  });
+  return `Verso ${max + 1}`;
+}
+
+/** opts: {text, times: [line start s], onSave(text)}; default = the lyrics box. */
+function openTagDialog(opts = {}) {
+  T.onSave = opts.onSave || null;
+  T.stanzas = parseStanzas(opts.text !== undefined ? opts.text : lEls.text.value);
+  // the time each stanza starts (the n-th sung line of the text is the n-th timed line)
+  if (opts.times) {
+    let k = 0;
+    for (const s of T.stanzas) {
+      s.time = s.lines.length ? opts.times[k] : null;
+      k += s.lines.length;
+    }
+  }
+  if (!T.stanzas.length) {
+    banner(lEls.status, "Cole ou pesquise a letra primeiro: as estrofes aparecem aqui para você marcar.", "error");
+    return;
+  }
+  T.cur = Math.max(0, T.stanzas.findIndex((s) => !s.tag));
+  renderTagDialog();
+  tEls.dialog.showModal();
+  scrollToStanza();
+}
+
+function renderTagDialog() {
+  // palette: presets for the selected stanza ("Verso" gets the next free number)
+  tEls.palette.innerHTML = "";
+  const sel = T.stanzas[T.cur];
+  const used = [...new Set(T.stanzas.map((s) => s.tag).filter(Boolean))];
+  const labels = TAG_PRESETS.map((t) => (t === "Verso" ? nextVerseLabel() : t));
+  // parts already used that are not presets (e.g. "Verse 1" from Genius, "Refrão 2") can be reused too
+  for (const u of used) if (!labels.includes(u) && !/^(verso|verse)\b/i.test(u)) labels.push(u);
+  for (const label of labels) {
+    tEls.palette.append(el("button", {
+      type: "button", class: "chip tag-chip" + (sel && sel.tag === label ? " is-active" : ""),
+      onclick: () => setStanzaTag(label),
+      disabled: !sel,
+    }, label));
+  }
+  const custom = el("input", { type: "text", class: "tag-custom", maxlength: "40", placeholder: "Outra...", "aria-label": "Outro nome de parte" });
+  custom.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && custom.value.trim()) {
+      e.preventDefault();
+      setStanzaTag(custom.value.trim());
+    }
+  });
+  tEls.palette.append(custom,
+    el("button", { type: "button", class: "chip tag-chip tag-none", onclick: () => setStanzaTag(null), disabled: !sel }, "Sem tag"));
+
+  // stanzas
+  tEls.list.innerHTML = "";
+  T.stanzas.forEach((s, i) => {
+    const item = el("li", {},
+      el("button", {
+        type: "button", class: "tag-stanza" + (i === T.cur ? " is-selected" : "") + (s.tag ? "" : " is-untagged"),
+        "aria-pressed": i === T.cur ? "true" : "false",
+        onclick: () => { T.cur = i; renderTagDialog(); },
+      },
+      el("span", { class: "tag-side" },
+        el("span", { class: "tag-pill" + (s.tag ? ` ${tagTone(s.tag)}` : "") }, s.tag || "sem tag"),
+        s.time !== undefined && s.time !== null ? el("span", { class: "tag-time muted small" }, fmtClock(s.time, 0)) : null),
+      el("span", { class: "tag-lines" }, s.lines.length ? s.lines.join("\n") : "(sem letra: só a marcação)")));
+    tEls.list.append(item);
+  });
+  const tagged = T.stanzas.filter((s) => s.tag).length;
+  tEls.count.textContent = `${tagged} de ${T.stanzas.length} estrofes marcadas`;
+}
+
+/** A colour family per kind of part, so the structure is readable at a glance. */
+function tagTone(tag) {
+  const t = tag.toLowerCase();
+  if (/^(refr|chorus|hook)/.test(t)) return "tone-chorus";
+  if (/^(pr[eé]|pre)/.test(t)) return "tone-pre";
+  if (/^(verso|verse)/.test(t)) return "tone-verse";
+  if (/^(ponte|bridge)/.test(t)) return "tone-bridge";
+  if (/^(intro|outro|final|end)/.test(t)) return "tone-edge";
+  return "tone-other";
+}
+
+function setStanzaTag(tag) {
+  const s = T.stanzas[T.cur];
+  if (!s) return;
+  s.tag = tag;
+  // move on to the next stanza still without a tag (or simply the next one)
+  const nextUntagged = T.stanzas.findIndex((x, i) => i > T.cur && !x.tag);
+  if (nextUntagged >= 0) T.cur = nextUntagged;
+  else if (T.cur < T.stanzas.length - 1) T.cur += 1;
+  renderTagDialog();
+  scrollToStanza();
+}
+
+function scrollToStanza() {
+  const btn = tEls.list.querySelectorAll(".tag-stanza")[T.cur];
+  if (btn) btn.scrollIntoView({ block: "nearest" });
+}
+
+function updateTagSummary() {
+  const stanzas = parseStanzas(lEls.text.value);
+  const tagged = stanzas.filter((s) => s.tag).length;
+  tEls.summary.textContent = stanzas.length ? `${tagged} de ${stanzas.length} estrofes com parte marcada` : "";
+}
+
+$("tagOpenBtn").addEventListener("click", () => openTagDialog());
+$("tagSaveBtn").addEventListener("click", () => {
+  if (T.onSave) {
+    const text = stanzasToText(T.stanzas);
+    tEls.dialog.close();
+    T.onSave(text);
+    return;
+  }
+  lEls.text.value = stanzasToText(T.stanzas);
+  tEls.dialog.close();
+  updateTagSummary();
+  saveLyricsDraft();
+});
+for (const id of ["tagCancelBtn", "tagCloseBtn"]) $(id).addEventListener("click", () => tEls.dialog.close());
+$("tagClearBtn").addEventListener("click", () => {
+  T.stanzas.forEach((s) => { s.tag = null; });
+  T.cur = 0;
+  renderTagDialog();
+});
+lEls.text.addEventListener("input", updateTagSummary);
+
+// ---------- lyrics search on Genius (fills the lyrics box; the user still aligns it) ----------
+
+const gEls = {
+  form: $("geniusForm"),
+  query: $("geniusQuery"),
+  btn: $("geniusBtn"),
+  status: $("geniusStatus"),
+  results: $("geniusResults"),
+};
+let geniusSeq = 0;  // drops answers of an older search / another project
+
+/** "01 - Il Sussurro dei Draghi v4" -> "Il Sussurro dei Draghi" */
+/** "01 - Il Sussurro dei Draghi v4.wav" -> "Il Sussurro dei Draghi v4": no extension, no track number
+ * ("01 - ", "1 - ", "01. ", "1) "...). A number without a separator stays: "7 Rings", "1984". */
+function songNameFromFile(filename) {
+  const base = filename.replace(/\.[^.]+$/, "").replace(/_+/g, " ").trim();
+  return base.replace(/^\d{1,3}\s*[-–—.)]+\s*/, "").trim() || base;
+}
+
+function geniusQueryFromName(name) {
+  return (name || "").replace(/^\s*\d+\s*[-._)]\s*/, "").replace(/\s+v\d+\s*$/i, "").trim();
+}
+
+function resetGenius() {
+  geniusSeq++;
+  gEls.query.value = state.project ? geniusQueryFromName(state.project.name) : "";
+  gEls.results.innerHTML = "";
+  hide(gEls.results);
+  hide(gEls.status);
+  gEls.btn.disabled = false;
+}
+
+async function searchGenius() {
+  const q = gEls.query.value.trim();
+  if (!q) {
+    gEls.query.focus();
+    return;
+  }
+  const seq = ++geniusSeq;
+  gEls.btn.disabled = true;
+  hide(gEls.results);
+  banner(gEls.status, "Pesquisando no Genius...", "busy");
+  try {
+    const { results } = await api(`/api/lyrics/search?q=${encodeURIComponent(q)}`);
+    if (seq !== geniusSeq) return;
+    if (!results.length) {
+      banner(gEls.status, "Nada encontrado. Tente outro nome ou inclua o artista.", "error");
+      return;
+    }
+    hide(gEls.status);
+    renderGeniusResults(results);
+  } catch (err) {
+    if (seq === geniusSeq) banner(gEls.status, `Erro: ${err.message}`, "error");
+  } finally {
+    if (seq === geniusSeq) gEls.btn.disabled = false;
+  }
+}
+
+function renderGeniusResults(results) {
+  gEls.results.innerHTML = "";
+  for (const r of results) {
+    const meta = [r.artist, r.year].filter(Boolean).join(" · ");
+    const pending = r.lyrics_state && r.lyrics_state !== "complete";
+    gEls.results.append(el("li", {},
+      el("button", { type: "button", class: "genius-item", onclick: (e) => pickGenius(r, e.currentTarget) },
+        r.thumbnail ? el("img", { src: r.thumbnail, alt: "", loading: "lazy", width: "44", height: "44" }) : el("span", { class: "genius-noart" }, "♪"),
+        el("span", { class: "genius-text" },
+          el("strong", {}, r.title),
+          el("span", { class: "muted small" }, meta + (pending ? " · letra incompleta" : ""))),
+        el("span", { class: "genius-use small" }, "Usar"))));
+  }
+  show(gEls.results);
+}
+
+async function pickGenius(r, btn) {
+  const seq = ++geniusSeq;
+  gEls.results.querySelectorAll("button").forEach((b) => { b.disabled = true; });
+  btn.classList.add("is-loading");
+  banner(gEls.status, `Buscando a letra de "${r.title}"...`, "busy");
+  try {
+    const data = await api(`/api/lyrics/genius/${r.id}`);
+    if (seq !== geniusSeq) return;
+    lEls.text.value = data.text;
+    updateTagSummary();
+    setLang(data.language);
+    saveLyricsDraft(`Genius: ${data.title} · ${data.artist}`);
+    gEls.results.innerHTML = "";
+    hide(gEls.results);
+    banner(gEls.status, `Letra de "${data.title}" (${data.artist}) carregada do Genius. Confira e clique em "Alinhar com a voz".`);
+    lEls.text.scrollTop = 0;
+    lEls.text.focus({ preventScroll: true });
+  } catch (err) {
+    if (seq !== geniusSeq) return;
+    banner(gEls.status, `Erro: ${err.message}`, "error");
+    gEls.results.querySelectorAll("button").forEach((b) => { b.disabled = false; });
+    btn.classList.remove("is-loading");
+  }
+}
+
+gEls.form.addEventListener("submit", (e) => {
+  e.preventDefault();
+  searchGenius();
 });
 lEls.playBtn.addEventListener("click", () => els.projPlayBtn.click());
 
@@ -2266,6 +3665,7 @@ function lyricsHintText() {
 
 function renderLyrics() {
   if (!lyricsIsCurrent()) return;
+  renderLyricOverlay();
   const d = L.data;
   const has = !!(d && d.lyrics);
   const editing = !has || L.editing;
@@ -2274,6 +3674,7 @@ function renderLyrics() {
   show(lEls.cancelBtn, has && L.editing);
   // editing synced lyrics starts from them, not from an empty box
   if (has && L.editing && !lEls.text.value.trim()) lEls.text.value = d.lyrics.text;
+  if (editing) updateTagSummary();
   show($("lyricsIntro"), editing);  // the "how it works" line only while setting it up
   lEls.alignBtn.textContent = has ? "Alinhar de novo" : "Alinhar com a voz";
   lEls.hint.textContent = lyricsHintText();
@@ -2297,6 +3698,7 @@ function renderLyrics() {
 }
 
 const SECTION_SOURCE = {
+  inferred: "inferido pela música",
   tag: "da tag na letra",
   repeat: "mesmo texto de outra seção",
   gap: "pausa longa na voz",
@@ -2322,9 +3724,10 @@ function renderStructure() {
     list.append(el("button", {
       type: "button",
       class: `chip section-chip${s.kind === "instrumental" ? " is-instrumental" : ""}${exists ? " is-saved" : ""}`,
-      title: `${fmtClock(s.start)}–${fmtClock(s.end)} · ${SECTION_SOURCE[s.source] || ""}${exists ? " · já é uma parte" : ""}\nClique para ouvir em loop`,
+      title: `${fmtClock(s.start)}–${fmtClock(s.end)} · ${SECTION_SOURCE[s.source] || ""}${s.why ? ` (${s.why})` : ""}${exists ? " · já é uma parte" : ""}\nClique para ouvir em loop`,
       onclick: () => playSelectionLoop({ kind: "range", name: s.name, start: s.start, end: s.end, color: RANGE_COLOR }),
-    }, s.name, el("small", {}, fmtClock(s.start, 0))));
+    }, s.name, s.source === "inferred" ? el("span", { class: "section-guess", "aria-label": "inferido" }, "≈") : null,
+      el("small", {}, fmtClock(s.start, 0))));
   }
   $("sectionsToPartsBtn").disabled = sections.every((s) =>
     saved.some((p) => p.name === s.name && Math.abs(p.start - s.start) < 1 && Math.abs(p.end - s.end) < 1));
@@ -2341,8 +3744,11 @@ $("sectionsToPartsBtn").addEventListener("click", async () => {
     renderPartList();
     renderStructure();
     renderSheetFilter();
-    banner(lEls.status, data.created
-      ? `${data.created} parte(s) criada(s) a partir da letra. Ajuste os limites na waveform se precisar.`
+    const msgs = [];
+    if (data.created) msgs.push(`${data.created} parte(s) criada(s)`);
+    if (data.updated) msgs.push(`${data.updated} parte(s) ajustada(s) à estrutura nova`);
+    banner(lEls.status, msgs.length
+      ? `${msgs.join(" e ")} a partir da letra. Ajuste os limites na waveform se precisar.`
       : "Todas as seções já eram partes.");
   } catch (err) {
     banner(lEls.status, `Erro ao criar as partes: ${err.message}`, "error");
@@ -2487,6 +3893,181 @@ function renderSheet(ctx = SU.project) {
   const w = ctx.getWave();
   updateSheet(w ? w.ws.getCurrentTime() : 0, true, ctx);
 }
+
+// ---------- chord sheet: printable / PDF (black and white, chords in bold) ----------
+
+function escHtml(s) {
+  return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+/** The chord sheet as a standalone HTML page: two columns, chords bold over the syllables.
+ * Each section stays in one piece; chords-only blocks are re-wrapped to fit a column. */
+const PRINT_INSTR_COLS = 34;  // characters per line of a chords-only block
+
+function sheetPrintHtml() {
+  const ctx = SU.project;
+  const useNumerals = ctx.numerals.checked;
+  const range = ctx.getRange();
+  const inRange = (it) => !range || (it.end > range.start + 0.05 && it.start < range.end - 0.05);
+  const items = L.data.sheet;
+  const groups = [];  // [{title, rows: [html], instr: [chord labels]}]
+  const group = (title) => {
+    const g = { title, rows: [], instr: null };
+    groups.push(g);
+    return g;
+  };
+  const flushInstr = (g) => {
+    if (!g || !g.instr) return;
+    // chords-only block: wrapped at PRINT_INSTR_COLS characters
+    const lines = [];
+    let cur = "";
+    let len = 0;
+    for (const c of g.instr) {
+      const add = (len ? 3 : 0) + c.length;
+      if (len && len + add > PRINT_INSTR_COLS) {
+        lines.push(cur);
+        cur = "";
+        len = 0;
+      }
+      cur += `${len ? "   " : ""}<b>${escHtml(c)}</b>`;
+      len += (len ? 3 : 0) + c.length;
+    }
+    if (cur) lines.push(cur);
+    g.rows.push(`<pre class="instr">${lines.join("\n")}</pre>`);
+    g.instr = null;
+  };
+  let g = null;
+  let lastInstr = null;
+  items.forEach((it, i) => {
+    if (it.kind === "section") {
+      const nextRow = items.slice(i + 1).find((x) => x.kind !== "section");
+      if (range && !(nextRow && inRange(nextRow))) return;
+      flushInstr(g);
+      lastInstr = null;
+      g = group(it.name);
+      return;
+    }
+    if (!inRange(it)) return;
+    if (it.kind === "chords") {
+      // named after the instrumental section it falls in (Intro, Solo, Outro...)
+      const sec = (L.data.sections || []).find((x) => x.kind === "instrumental" && it.start >= x.start - 0.5 && it.start < x.end);
+      if (!g || (sec && sec !== lastInstr)) {
+        flushInstr(g);
+        g = group(sec ? sec.name : "");
+      }
+      lastInstr = sec || lastInstr;
+      g.instr = (g.instr || []).concat(it.chords.map((c) => (useNumerals ? c.numeral : c.label)));
+      return;
+    }
+    if (!g) g = group("");
+    flushInstr(g);
+    // chord line: each chord at its character column, padded with spaces (same layout as on screen)
+    let line = "";
+    let width = 0;
+    for (const c of sheetChordCols(it.chords, useNumerals)) {
+      line += " ".repeat(Math.max(0, c.col - width)) + `<b>${escHtml(c.text)}</b>`;
+      width = Math.max(width, c.col) + c.text.length;
+    }
+    g.rows.push(`<pre class="line${it.para && g.rows.length ? " para" : ""}">${line ? `${line}\n` : ""}${escHtml(it.text)}</pre>`);
+  });
+  flushInstr(g);
+
+  const p = state.project;
+  const meta = [];
+  if (H.data && H.data.key) meta.push(`Tom: <b>${escHtml(H.data.key.name)}</b>`);
+  if (p.detected_bpm) meta.push(`${Math.round(p.detected_bpm)} BPM`);
+  const part = range && lEls.filter.value && p.parts.find((x) => x.part_id === lEls.filter.value);
+  if (part) meta.push(`Parte: ${escHtml(part.name)}`);
+  if (useNumerals) meta.push("acordes em graus");
+  const sections = groups.filter((x) => x.rows.length)
+    .map((x) => `<section>${x.title ? `<h2>${escHtml(x.title)}</h2>` : ""}${x.rows.join("")}</section>`).join("\n");
+  return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
+<title>${escHtml(sheetPdfName())}</title>
+<style>
+  @page { size: A4; margin: 10mm 11mm; }
+  :root { --fs: 9pt; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; color: #000; background: #fff; }
+  body { width: 188mm; font-family: "Segoe UI", Arial, sans-serif; }
+  header { display: flex; align-items: baseline; gap: 4mm; flex-wrap: wrap;
+           border-bottom: 0.4pt solid #000; padding-bottom: 1.5mm; margin-bottom: 3mm; }
+  h1 { font-size: calc(var(--fs) * 1.7); margin: 0; }
+  .meta { font-size: calc(var(--fs) * 1.05); }
+  .cols { column-count: 2; column-gap: 7mm; column-rule: 0.3pt solid #bbb; }
+  section { break-inside: avoid; page-break-inside: avoid; margin: 0 0 calc(var(--fs) * 0.9); }
+  h2 { font-size: calc(var(--fs) * 0.95); margin: 0 0 calc(var(--fs) * 0.25); text-transform: uppercase;
+       letter-spacing: .05em; }
+  pre { margin: 0; font-family: "Cascadia Mono", Consolas, "Courier New", monospace; font-size: var(--fs);
+        line-height: 1.22; white-space: pre-wrap; break-inside: avoid; }
+  pre.line { margin-bottom: calc(var(--fs) * 0.2); }
+  pre.para { margin-top: calc(var(--fs) * 0.55); }
+  b { font-weight: 800; }
+  .foot { margin-top: 2mm; font-size: calc(var(--fs) * 0.75); color: #555; column-span: all; }
+</style></head><body>
+<header><h1>${escHtml(p.name)}</h1>${meta.length ? `<span class="meta">${meta.join(" &nbsp;·&nbsp; ")}</span>` : ""}</header>
+<div class="cols">
+${sections || "<p>Nada cantado neste trecho.</p>"}
+<p class="foot">Acordes detectados automaticamente: confira de ouvido.</p>
+</div>
+</body></html>`;
+}
+
+/** "Nome da música - cifra - escritab" (with the part in parentheses when the sheet is filtered):
+ * the browser suggests the page title as the PDF file name. */
+function sheetPdfName() {
+  const p = state.project;
+  const part = SU.project.getRange() && lEls.filter.value && p.parts.find((x) => x.part_id === lEls.filter.value);
+  const name = `${p.name}${part ? ` (${part.name})` : ""} - cifra - escritab`;
+  return name.replace(/[\\/:*?"<>|]+/g, " ").replace(/\s+/g, " ").trim();  // characters a file name cannot have
+}
+
+const PRINT_FONT_MAX = 9.5;   // pt
+const PRINT_FONT_MIN = 6.5;   // below this it stops shrinking (and spills onto a second page)
+const MM = 96 / 25.4;         // CSS px per mm
+
+/** Largest font (between MIN and MAX) with which the page fits one A4 sheet. Returns the pt used. */
+function fitPrintPage(doc) {
+  const pageH = (297 - 20) * MM;  // A4 minus the @page margins
+  const root = doc.documentElement;
+  let fs = PRINT_FONT_MAX;
+  for (; fs >= PRINT_FONT_MIN; fs -= 0.25) {
+    root.style.setProperty("--fs", `${fs}pt`);
+    if (doc.body.scrollHeight <= pageH) return fs;
+  }
+  root.style.setProperty("--fs", `${PRINT_FONT_MIN}pt`);
+  return PRINT_FONT_MIN;
+}
+
+function exportSheetPdf() {
+  if (!L.data || !L.data.sheet) return;
+  const old = document.getElementById("printFrame");
+  if (old) old.remove();
+  // a hidden frame, A4-wide so the layout can be measured; its print dialog offers "Salvar como PDF"
+  const frame = el("iframe", { id: "printFrame", title: "Cifra para impressão", "aria-hidden": "true" });
+  frame.style.cssText = "position:fixed;left:-10000px;top:0;width:188mm;height:277mm;border:0;visibility:hidden";
+  document.body.append(frame);
+  const doc = frame.contentDocument;
+  doc.open();
+  doc.write(sheetPrintHtml());
+  doc.close();
+  const go = () => {
+    const fs = fitPrintPage(doc);
+    if (fs <= PRINT_FONT_MIN && doc.body.scrollHeight > (297 - 20) * MM) {
+      banner(lEls.status, "A cifra é longa demais para uma página com letra legível: ela vai ocupar duas páginas.");
+    }
+    // the file name comes from the title: the frame's, or the page's in some browsers, so both
+    const pageTitle = document.title;
+    const restore = () => { document.title = pageTitle; };
+    document.title = sheetPdfName();
+    frame.contentWindow.addEventListener("afterprint", restore, { once: true });
+    frame.contentWindow.focus();
+    frame.contentWindow.print();
+    setTimeout(restore, 1000);  // print() blocks until the dialog closes; fallback if afterprint never comes
+  };
+  if (doc.readyState === "complete") setTimeout(go, 50);
+  else frame.addEventListener("load", go, { once: true });
+}
+$("sheetPdfBtn").addEventListener("click", exportSheetPdf);
 
 /** Highlight the line (and the words already sung) under the playhead; keep it in view. */
 function updateSheet(t, force = false, ctx = SU.project) {
@@ -2792,20 +4373,21 @@ async function renderPartView() {
   els.partNameInput.value = part.name;
   renderPartMeta();
   hide(els.partStatus);
-  els.partRate.value = "100";
-  els.partRateVal.textContent = "100%";
+  setPartRateUi(100);
   fillSourceSelect(els.partSource, preferredStem(part));
   renderSourcePicker(part);
   restorePartSettings(part);
   renderPartResult(part, null);
   resetScales(part);
+  restorePartTab(part);
 
   partWave = await createWave(els.partWave, els.partSource.value);
   const w = partWave;
   w.excerpt = { start: part.start, end: part.end };   // replaced by the region once the wave is ready
   w.onTime = (t) => {
     const r = w.excerpt;
-    els.partTime.textContent = `${fmtClock(Math.max(0, t - r.start))} / ${fmtClock(r.end - r.start)}`;
+    els.partTime.textContent = fmtClock(Math.max(0, t - r.start));
+    $("partTimeTotal").textContent = fmtClock(r.end - r.start);
     updateNowChord(t, false, CU.part);
     syncChordLane(CU.part);
     updateSheet(t, false, SU.part);
@@ -2824,8 +4406,9 @@ async function renderPartView() {
   hide($("partLyricsCard"));
   loadHarmony();
   loadLyrics();
-  w.ws.on("play", () => (els.partPlayBtn.innerHTML = "&#10074;&#10074; Pausar"));
-  w.ws.on("pause", () => (els.partPlayBtn.innerHTML = "&#10227; Tocar trecho"));
+  setPartPlaying(false);
+  w.ws.on("play", () => setPartPlaying(true));
+  w.ws.on("pause", () => setPartPlaying(false));
   w.regions.on("region-clicked", (region, e) => {
     e.stopPropagation();
     w.ws.setTime(clickTime(w, e));  // exact spot inside the excerpt, not its start
@@ -2860,6 +4443,8 @@ async function renderPartView() {
 function renderPartMeta() {
   const part = currentPart();
   els.partMeta.textContent = `${fmtRange(part.start, part.end)} · ${state.project.detected_bpm} BPM`;
+  $("partLcdRange").textContent = fmtRange(part.start, part.end);
+  $("partBpmLcd").textContent = state.project.detected_bpm ? Math.round(state.project.detected_bpm) : "–";
   els.partStartInput.value = part.start.toFixed(2);
   els.partEndInput.value = part.end.toFixed(2);
   els.partRangeSaveBtn.classList.remove("btn-attention");
@@ -2994,7 +4579,10 @@ function renderPartResult(part, asciiText) {
     ? `${st.total_notes} notas${st.lowest_note ? ` (${st.lowest_note} a ${st.highest_note})` : ""} · ${st.engine || ""}`
     : "";
   els.generateBtn.textContent = part.artifacts.musicxml ? "Gerar de novo" : "Gerar tablatura do trecho";
-  if (!part.artifacts.musicxml) {
+  const hasTab = !!part.artifacts.musicxml;
+  show($("tabEmpty"), !hasTab);
+  show($("ptabTabDot"), !hasTab);
+  if (!hasTab) {
     hide(els.playerSection);
     return;
   }
@@ -3062,6 +4650,8 @@ els.generateBtn.addEventListener("click", async () => {
     state.project = { ...state.project, parts: data.job.parts };
     hide(els.partStatus);
     renderPartResult(currentPart(), data.ascii_preview);
+    openPartTab("tab");
+    revealPartTabs();
     if (S.card.open) loadScales();  // the transcribed notes are better evidence than the raw audio
   } catch (err) {
     banner(els.partStatus, `Erro: ${err.message}`, "error");
@@ -3143,11 +4733,110 @@ document.addEventListener("keydown", (e) => {
   if (state.view === "part") playPartFromStart();
   else playProjectFromStart();
 });
+function setPartRateUi(pct) {
+  const s = els.partRate;
+  s.value = pct;
+  s.style.setProperty("--fill", `${((pct - Number(s.min)) / (Number(s.max) - Number(s.min))) * 100}%`);
+  els.partRateVal.textContent = `${pct}%`;
+  els.partRateVal.classList.toggle("slowed", pct !== 100);
+}
+function setPartPlaying(playing) {
+  els.partPlayBtn.classList.toggle("is-playing", playing);
+  els.partPlayBtn.setAttribute("aria-label", playing ? "Pausar" : "Play");
+}
 els.partRate.addEventListener("input", () => {
-  const rate = Number(els.partRate.value) / 100;
-  els.partRateVal.textContent = `${els.partRate.value}%`;
-  if (partWave) partWave.ws.setPlaybackRate(rate, true);
+  const pct = Number(els.partRate.value);
+  setPartRateUi(pct);
+  if (partWave) partWave.ws.setPlaybackRate(pct / 100, true);
 });
+els.partRate.addEventListener("dblclick", () => {
+  setPartRateUi(100);
+  if (partWave) partWave.ws.setPlaybackRate(1, true);
+});
+
+// ---------- part page: tabs (Tablatura / Transcrição / Escalas / Cifra) ----------
+
+const PART_TABS = ["tab", "transcribe", "scales", "sheet"];
+const partTabsEl = $("partTabs");
+const partPlayerCard = $("partPlayerCard");
+const PART_TAB_KEY = "escritab.partTab";
+let tabRenderPending = false;  // AlphaTab was (re)built while its panel was hidden
+
+function openPartTab(name, remember = true) {
+  if (!PART_TABS.includes(name)) name = "tab";
+  for (const b of partTabsEl.querySelectorAll(".tab")) {
+    const on = b.dataset.ptab === name;
+    b.classList.toggle("active", on);
+    b.setAttribute("aria-selected", String(on));
+    b.tabIndex = on ? 0 : -1;
+  }
+  for (const panel of document.querySelectorAll("[data-part-panel]")) show(panel, panel.dataset.partPanel === name);
+  if (name === "scales" && !S.card.open) S.card.open = true;  // its "toggle" listener loads the scales
+  if (name === "tab" && tabRenderPending && alphaTabApi) {
+    tabRenderPending = false;
+    alphaTabApi.render();
+  }
+  if (remember) {
+    try {
+      localStorage.setItem(PART_TAB_KEY, name);
+    } catch {
+      /* private mode / blocked storage */
+    }
+  }
+}
+
+/** Last tab used, but a part without tablatura opens on "Transcrição" instead of an empty tab. */
+function restorePartTab(part) {
+  let name = null;
+  try {
+    name = localStorage.getItem(PART_TAB_KEY);
+  } catch {
+    /* ignore */
+  }
+  if (!PART_TABS.includes(name)) name = "tab";
+  if (name === "tab" && !part.artifacts.musicxml) name = "transcribe";
+  openPartTab(name, false);
+}
+
+function revealPartTabs() {
+  if (partTabsEl.getBoundingClientRect().top < 0) partTabsEl.scrollIntoView({ block: "start" });
+}
+
+partTabsEl.addEventListener("click", (e) => {
+  const b = e.target.closest(".tab");
+  if (!b) return;
+  openPartTab(b.dataset.ptab);
+  revealPartTabs();
+});
+partTabsEl.addEventListener("keydown", (e) => {
+  const order = [...partTabsEl.querySelectorAll(".tab")];
+  const i = order.indexOf(document.activeElement);
+  if (i < 0) return;
+  let j = null;
+  if (e.key === "ArrowRight") j = (i + 1) % order.length;
+  else if (e.key === "ArrowLeft") j = (i - 1 + order.length) % order.length;
+  else if (e.key === "Home") j = 0;
+  else if (e.key === "End") j = order.length - 1;
+  if (j === null) return;
+  e.preventDefault();
+  e.stopPropagation();  // Home here moves between tabs, not "play from start"
+  order[j].focus();
+  openPartTab(order[j].dataset.ptab);
+});
+$("tabEmptyBtn").addEventListener("click", () => {
+  openPartTab("transcribe");
+  revealPartTabs();
+});
+// the scales card is a <details>: inside its tab it stays open
+S.card.addEventListener("toggle", () => {
+  if (!S.card.open && !S.card.parentElement.classList.contains("hidden")) S.card.open = true;
+});
+new ResizeObserver(() => {
+  document.documentElement.style.setProperty("--part-player-h", `${partPlayerCard.offsetHeight}px`);
+}).observe(partPlayerCard);
+new IntersectionObserver(([entry]) => {
+  partPlayerCard.classList.toggle("is-stuck", !entry.isIntersecting && entry.boundingClientRect.top < 0);
+}).observe($("partPlayerSentinel"));
 els.partSource.addEventListener("change", () => {
   if (!partWave) return;
   switchSource(partWave, els.partSource.value);
@@ -3179,6 +4868,7 @@ els.partRangeSaveBtn.addEventListener("click", async () => {
   try {
     const data = await patchJson(projectUrl(`/parts/${part.part_id}`), { start, end });
     state.project = { ...state.project, parts: data.job.parts };
+    if (data.lyrics_changed) loadLyrics();  // the stanza moved into the new bounds
     const updated = currentPart();
     renderPartMeta();
     renderPartResult(updated, null);
@@ -3248,6 +4938,7 @@ function initAlphaTab(musicXmlUrl) {
     },
   });
   tabFontLoaded = tabFontUrl();
+  tabRenderPending = els.playerSection.offsetParent === null;  // rendered at width 0: redo when shown
   // Without these the tab player fails silently (Play does nothing, no sound).
   alphaTabApi.soundFontLoad.on((e) => {
     if (e.total > 0 && e.loaded < e.total) banner(els.tabStatus, `Carregando o som da tablatura... ${Math.round((e.loaded / e.total) * 100)}%`, "busy");
@@ -3258,22 +4949,62 @@ function initAlphaTab(musicXmlUrl) {
     console.error("[EscriTab] AlphaTab", err);
     banner(els.tabStatus, `Erro no player da tablatura: ${(err && err.message) || err}`, "error");
   });
-  alphaTabApi.isLooping = els.loopCheck.checked;
-  alphaTabApi.playbackSpeed = Number(els.speedSelect.value);
+  // transport LCD + play button state (same behaviour as the main DAW transport)
+  resetTabLcd();
+  alphaTabApi.scoreLoaded.on((score) => {
+    $("tabBpmLcd").textContent = score && score.tempo ? Math.round(score.tempo) : "–";
+  });
+  alphaTabApi.playerStateChanged.on((e) => setTabPlaying(e.state === 1));
+  alphaTabApi.playerPositionChanged.on((e) => {
+    $("tabTime").textContent = fmtClock(e.currentTime / 1000);
+    $("tabTimeTotal").textContent = fmtClock(e.endTime / 1000);
+  });
+  alphaTabApi.playedBeatChanged.on((beat) => {
+    try {
+      const bar = beat.voice.bar;
+      const mb = bar.masterBar;
+      const beatTicks = (960 * 4) / (mb.timeSignatureDenominator || 4);
+      $("tabBarBeat").textContent = `${bar.index + 1}.${Math.floor(beat.playbackStart / beatTicks) + 1}`;
+      const tempo = mb.tempoAutomations && mb.tempoAutomations.length ? mb.tempoAutomations[0].value : null;
+      if (tempo) $("tabBpmLcd").textContent = Math.round(tempo);
+    } catch { /* model shape differs: leave the LCD as is */ }
+  });
+  alphaTabApi.isLooping = els.tabLoopCheck.checked;
+  alphaTabApi.playbackSpeed = Number(els.tabRate.value) / 100;
   alphaTabApi.metronomeVolume = els.metronomeCheck.checked ? 1 : 0;
+}
+
+function setTabPlaying(playing) {
+  els.playPauseBtn.classList.toggle("is-playing", playing);
+  els.playPauseBtn.setAttribute("aria-label", playing ? "Pausar" : "Play");
+}
+function resetTabLcd() {
+  setTabPlaying(false);
+  $("tabTime").textContent = fmtClock(0);
+  $("tabTimeTotal").textContent = fmtClock(0);
+  $("tabBarBeat").textContent = "–";
+  $("tabBpmLcd").textContent = "–";
+}
+function setTabRate(pct) {
+  const s = els.tabRate;
+  s.value = pct;
+  s.style.setProperty("--fill", `${((pct - Number(s.min)) / (Number(s.max) - Number(s.min))) * 100}%`);
+  els.tabRateVal.textContent = `${pct}%`;
+  els.tabRateVal.classList.toggle("slowed", pct !== 100);
+  if (alphaTabApi) alphaTabApi.playbackSpeed = pct / 100;
 }
 
 els.playPauseBtn.addEventListener("click", () => alphaTabApi && alphaTabApi.playPause());
 els.stopBtn.addEventListener("click", () => alphaTabApi && alphaTabApi.stop());
-els.loopCheck.addEventListener("change", () => {
-  if (alphaTabApi) alphaTabApi.isLooping = els.loopCheck.checked;
+els.tabLoopCheck.addEventListener("change", () => {
+  if (alphaTabApi) alphaTabApi.isLooping = els.tabLoopCheck.checked;
 });
 els.metronomeCheck.addEventListener("change", () => {
   if (alphaTabApi) alphaTabApi.metronomeVolume = els.metronomeCheck.checked ? 1 : 0;
 });
-els.speedSelect.addEventListener("change", () => {
-  if (alphaTabApi) alphaTabApi.playbackSpeed = Number(els.speedSelect.value);
-});
+els.tabRate.addEventListener("input", () => setTabRate(Number(els.tabRate.value)));
+els.tabRate.addEventListener("dblclick", () => setTabRate(100));
+setTabRate(100);
 
 // ---------- sliders ----------
 
@@ -3478,9 +5209,13 @@ async function mpLoadSong() {
   }
   hide(mpEls.status);
   try {
+    let melodicIdx = 0;
     await sound.player.setSong(
       fileUrl(midiName),
-      tracks.map((t) => ({ ...t, channel: t.is_drum ? 9 : MELODIC_CHANNELS[t.index % MELODIC_CHANNELS.length] })),
+      tracks.map((t) => ({
+        ...t,
+        channel: t.is_drum ? 9 : MELODIC_CHANNELS[melodicIdx++ % MELODIC_CHANNELS.length],
+      })),
     );
   } catch (err) {
     banner(mpEls.status, `Erro ao carregar o MIDI: ${err.message}`, "error");

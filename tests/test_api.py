@@ -217,3 +217,125 @@ def test_part_scales_endpoint_and_lead_with_scale(tmp_path: Path):
 
     body["transcription"]["scale"] = "9:bogus"
     assert client.post(f"/api/projects/{pid}/parts/{part_id}/generate", json=body).status_code == 400
+
+
+def test_html_has_no_duplicate_ids_and_js_assigns_sequential_melodic_channels(tmp_path: Path):
+    import re
+    client = TestClient(create_app(workspace_root=tmp_path))
+    html = client.get("/").text
+    ids = re.findall(r'\bid="([^"]+)"', html)
+    duplicates = {x for x in ids if ids.count(x) > 1}
+    assert not duplicates, f"Duplicate HTML IDs found: {duplicates}"
+
+    js = client.get("/static/app.js").text
+    assert "tabLoopCheck" in js
+    # melodic channel assignment must skip drums without advancing the melodic index by raw track.index
+    assert "t.index % MELODIC_CHANNELS.length" not in js
+
+
+def test_multitrack_and_separate_preserve_parts_created_while_running(tmp_path: Path, monkeypatch):
+    from app.pipeline import dettato_transcriber
+
+    client = TestClient(create_app(workspace_root=tmp_path))
+    pid = _create_project(client, _make_wav_bytes(duration_s=3.0))["job_id"]
+
+    def fake_transcribe_multitrack(audio_path, full_midi, split_guitar_roles=True):
+        # Simulate the user creating a part while Dettato is running
+        res_part = client.post(f"/api/projects/{pid}/parts", json={"name": "Durante Dettato", "start": 0.0, "end": 1.5})
+        assert res_part.status_code == 200
+        full_midi.write_bytes(b"MThd")
+        return [], {"device": "cpu"}
+
+    monkeypatch.setattr(dettato_transcriber, "is_available", lambda: True)
+    monkeypatch.setattr(dettato_transcriber, "transcribe_multitrack", fake_transcribe_multitrack)
+
+    res = client.post(f"/api/projects/{pid}/multitrack")
+    assert res.status_code == 200
+    assert [p["name"] for p in res.json()["job"]["parts"]] == ["Durante Dettato"]
+    assert [p["name"] for p in client.get(f"/api/projects/{pid}").json()["parts"]] == ["Durante Dettato"]
+
+    def fake_separate_stems(input_audio_path, job_dir, is_isolated_stem=False, model_name="htdemucs_6s"):
+        res_part = client.post(f"/api/projects/{pid}/parts", json={"name": "Durante Demucs", "start": 1.0, "end": 2.5})
+        assert res_part.status_code == 200
+        return {"guitar": "stem_guitar.wav"}, "cpu"
+
+    monkeypatch.setattr("app.main.separate_stems", fake_separate_stems)
+    res_sep = client.post(f"/api/projects/{pid}/separate")
+    assert res_sep.status_code == 200
+    assert [p["name"] for p in client.get(f"/api/projects/{pid}").json()["parts"]] == ["Durante Dettato", "Durante Demucs"]
+
+
+def test_excerpt_audio_pads_mismatched_stem_lengths_and_normalizes_before_gate(tmp_path: Path):
+    from app.models import JobMetadata, Part, TranscriptionParams
+    from app.projects import _basic_pitch_excerpt, _excerpt_audio
+
+    sr = 22050
+    s1 = np.full(sr * 1, 0.6, dtype=np.float32)      # 1.0 s
+    s2 = np.full(sr * 2, 0.6, dtype=np.float32)      # 2.0 s
+    sf.write(tmp_path / "s1.wav", s1, sr)
+    sf.write(tmp_path / "s2.wav", s2, sr)
+
+    job = JobMetadata(
+        job_id="j1", created_at="2026-01-01T00:00:00Z", original_filename="a.wav",
+        input_path="s2.wav", duration=2.0, stems={"guitar": "s1.wav", "other": "s2.wav"},
+    )
+    part = Part(part_id="p1", name="P", start=0.0, end=2.0, created_at="2026-01-01T00:00:00Z")
+    params = TranscriptionParams(stem="guitar+other", bandpass_enabled=False, noise_gate_db=-20.0)
+
+    mixed, _ = _excerpt_audio(job, tmp_path, part, params, sr)
+    assert mixed is not None
+    # Must preserve the full 2.0 s length of the longest stem, not truncate to 1.0 s
+    assert len(mixed) == sr * 2
+    # And peak must be normalized so summing two 0.6 stems doesn't clip > 1.0
+    assert float(np.max(np.abs(mixed))) <= 1.0
+
+
+
+def test_default_name_drops_the_track_number():
+    from app.projects import default_name
+
+    assert default_name("01 - Il Sussurro dei Draghi v4.wav") == "Il Sussurro dei Draghi v4"
+    assert default_name("1. Song.mp3") == "Song"
+    assert default_name("7 Rings.mp3") == "7 Rings"
+    assert default_name("1984.wav") == "1984"
+
+
+def test_stems_mix_sums_the_chosen_stems(tmp_path: Path):
+    from app.models import JobMetadata
+    from app.projects import PartError, stems_mix
+    import pytest
+
+    sr = 22050
+    for name, val in [("bass", 0.2), ("guitar", 0.3)]:
+        sf.write(str(tmp_path / f"stem_{name}.wav"), np.full((sr, 2), val, dtype=np.float32), sr)
+    job = JobMetadata(job_id="j", created_at="2026-01-01T00:00:00Z", original_filename="a.wav", input_path="a.wav",
+                      stems={"bass": "stem_bass.wav", "guitar": "stem_guitar.wav"})
+    assert stems_mix(job, tmp_path, ["guitar"]).name == "stem_guitar.wav"
+    out = stems_mix(job, tmp_path, ["guitar", "bass"])
+    assert out.name == "mix_bass+guitar.wav"
+    data, rate = sf.read(str(out))
+    assert rate == sr and data.shape == (sr, 2) and abs(data[100, 0] - 0.5) < 0.01
+    with pytest.raises(PartError):
+        stems_mix(job, tmp_path, ["vocals"])
+
+
+def test_new_part_fits_into_the_timeline(tmp_path: Path):
+    from app.models import JobMetadata
+    from app.projects import insert_part_fitted, new_part
+
+    job = JobMetadata(job_id="j", created_at="2026-01-01T00:00:00Z", original_filename="a.wav", input_path="a.wav",
+                      duration=100.0)
+    new_part(job, "Verso 3", 40.0, 56.0)
+    new_part(job, "Verso 4", 56.0, 64.0)
+    new_part(job, "Curta", 52.0, 52.6)
+    # a breakdown at the end of verse 3, running into verse 4
+    part, changes = insert_part_fitted(job, tmp_path, "Breakdown", 50.0, 57.0)
+    bounds = {p.name: (p.start, p.end) for p in job.parts}
+    assert bounds["Verso 3"] == (40.0, 50.0)
+    assert bounds["Breakdown"] == (50.0, 57.0)
+    assert bounds["Verso 4"] == (57.0, 64.0)
+    assert "Curta" not in bounds and len(changes) == 3
+    # a part in the middle of another splits it
+    insert_part_fitted(job, tmp_path, "Solo", 42.0, 45.0)
+    verses = sorted((p.start, p.end) for p in job.parts if p.name == "Verso 3")
+    assert verses == [(40.0, 42.0), (45.0, 50.0)]

@@ -14,3 +14,6 @@ workspace/
 
 # local SoundFont library (junction or folder)
 /soundfonts
+
+# secrets (Genius API token etc.)
+.env

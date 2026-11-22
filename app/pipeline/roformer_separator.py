@@ -18,7 +18,6 @@ import logging
 import os
 import re
 import threading
-import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -59,10 +58,10 @@ def _ensure_files() -> tuple[Path, Path]:
     for ext, url in MODEL_URLS.items():
         p = d / f"{MODEL_NAME}{ext}"
         if not p.exists() or p.stat().st_size == 0:
+            from app.pipeline import model_downloads
+
             log.info("downloading %s", url)
-            tmp = p.with_suffix(p.suffix + ".part")
-            urllib.request.urlretrieve(url, tmp)
-            tmp.replace(p)
+            model_downloads.download_file(url, p, f"BS-RoFormer ({ext[1:]})")
         paths[ext] = p
     return paths[".ckpt"], paths[".yaml"]
 

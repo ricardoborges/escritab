@@ -84,6 +84,10 @@ def separate_stems(
     if model_name == "roformer_htdemucs_6s":
         return _separate_roformer_then_demucs(input_audio_path, job_dir)
 
+    from app.pipeline import model_downloads
+
+    model_downloads.ensure_demucs(model_name)  # first run: download with progress for the UI
+
     demucs_tmp = job_dir / "_demucs_tmp"
     demucs_tmp.mkdir(parents=True, exist_ok=True)
 

@@ -126,9 +126,9 @@ def _run_basic_pitch_or_fallback(
     return notes
 
 
-def reduce_to_monophonic(notes: list[NoteEvent], onset_window_s: float = 0.030) -> list[NoteEvent]:
-    """One note at a time: per onset group keep the loudest note (ties -> the lower one, since a
-    polyphonic model's extra notes are mostly harmonics above the played note), drop notes that
+def reduce_to_monophonic(notes: list[NoteEvent], onset_window_s: float = 0.045) -> list[NoteEvent]:
+    """One note at a time: per onset group keep the note that best continues the melodic line
+    (velocity + proximity to the previous pitch when an octave doubling is present), drop notes that
     start while a much louder note is still ringing, then cut each note at the next onset."""
     if not notes:
         return []
@@ -139,13 +139,26 @@ def reduce_to_monophonic(notes: list[NoteEvent], onset_window_s: float = 0.030) 
         j = i + 1
         while j < len(ordered) and ordered[j].start - ordered[i].start <= onset_window_s:
             j += 1
-        best = max(ordered[i:j], key=lambda n: (n.velocity, -n.pitch))
+        group = ordered[i:j]
+        if picked and len(group) > 1 and (group[0].start - picked[-1].start) < 0.8:
+            prev_p = picked[-1].pitch
+            # Prefer a note in the current register over an octave jump when velocities are comparable
+            best = max(group, key=lambda n: (n.velocity - 1.8 * abs(n.pitch - prev_p), -n.pitch))
+        else:
+            best = max(group, key=lambda n: (n.velocity, -n.pitch))
         # a quiet onset under a sustaining louder note is bleed / a ghost, not a new note
-        if picked and best.start < picked[-1].end and best.velocity < 0.5 * picked[-1].velocity:
+        if picked and best.start < picked[-1].end and best.velocity < 0.55 * picked[-1].velocity:
             i = j
             continue
         picked.append(best)
         i = j
+    # Repair remaining single-note octave drops inside a fast phrase (e.g. D5 -> D4 -> F#4 -> C#5)
+    for k in range(1, len(picked) - 1):
+        prev_n, cur_n, next_n = picked[k - 1], picked[k], picked[k + 1]
+        if cur_n.end - cur_n.start <= 0.35 and (cur_n.start - prev_n.end) <= 0.25 and (next_n.start - cur_n.end) <= 0.25:
+            up = cur_n.pitch + 12
+            if abs(up - prev_n.pitch) <= 3 and abs(up - next_n.pitch) <= 4:
+                picked[k] = cur_n.model_copy(update={"pitch": up})
     out: list[NoteEvent] = []
     for k, n in enumerate(picked):
         end = n.end
@@ -184,23 +197,32 @@ def postprocess_notes(
             out_of_range_adjusted += 1
         duration_filtered.append(n.model_copy(update={"pitch": pitch}))
 
-    # Harmonic suppression (+12 octave and +19 octave+fifth within 35ms onset window)
+    # Harmonic suppression (+12 octave and +19 octave+fifth within 45ms onset window)
     harmonics_removed = 0
     if params.suppress_harmonics and duration_filtered:
         kept: list[NoteEvent] = []
         for idx, candidate in enumerate(duration_filtered):
             is_spurious = False
+            overtone_sources: list[NoteEvent] = []
             for other in duration_filtered:
                 if other is candidate:
                     continue
-                if abs(candidate.start - other.start) <= 0.035:
+                if abs(candidate.start - other.start) <= 0.045:
                     interval = candidate.pitch - other.pitch
                     if interval in (12, 19):
+                        overtone_sources.append(other)
                         if candidate.velocity < (
                             other.velocity * params.harmonic_velocity_ratio
                         ):
                             is_spurious = True
                             break
+            # In a distorted power chord (root + 5th, interval 7 between them), a note sitting at BOTH
+            # +19 above the root AND +12 above the 5th is the 5th-harmonic overtone of the power chord
+            if not is_spurious and len(overtone_sources) >= 2:
+                src_pitches = {o.pitch for o in overtone_sources}
+                if any((p + 7) in src_pitches for p in src_pitches):
+                    if candidate.velocity <= max(o.velocity for o in overtone_sources):
+                        is_spurious = True
             if is_spurious:
                 harmonics_removed += 1
             else:
@@ -208,13 +230,13 @@ def postprocess_notes(
     else:
         kept = duration_filtered
 
-    # Group simultaneous onsets (within 30ms) to enforce max polyphony = num_strings
+    # Group simultaneous onsets (within 45ms) to enforce max polyphony = num_strings and align chord attacks
     polyphony_capped: list[NoteEvent] = []
     i = 0
     while i < len(kept):
         group = [kept[i]]
         j = i + 1
-        while j < len(kept) and (kept[j].start - group[0].start) <= 0.030:
+        while j < len(kept) and (kept[j].start - group[0].start) <= 0.045:
             group.append(kept[j])
             j += 1
         # Deduplicate identical pitches in the same onset slice (keep loudest)
@@ -226,9 +248,28 @@ def postprocess_notes(
         if len(unique_group) > num_strings:
             unique_group.sort(key=lambda x: x.velocity, reverse=True)
             unique_group = unique_group[:num_strings]
+        if len(unique_group) >= 2:
+            # Align chord onsets to the earliest attack so downstream layout doesn't split one strum across grid points
+            chord_start = min(g.start for g in unique_group)
+            unique_group = [
+                g.model_copy(update={"start": chord_start}) if g.end - chord_start >= min_len_s else g
+                for g in unique_group
+            ]
         unique_group.sort(key=lambda x: x.pitch)
         polyphony_capped.extend(unique_group)
         i = j
+
+    # Truncate overlapping notes of the exact same pitch (prevent 3ms re-attack overlap artifacts)
+    for k in range(len(polyphony_capped) - 1):
+        curr = polyphony_capped[k]
+        for m in range(k + 1, len(polyphony_capped)):
+            nxt = polyphony_capped[m]
+            if nxt.start >= curr.end:
+                break
+            if nxt.pitch == curr.pitch and nxt.start > curr.start:
+                polyphony_capped[k] = curr.model_copy(update={"end": nxt.start})
+                break
+    polyphony_capped = [n for n in polyphony_capped if (n.end - n.start) >= min_len_s]
 
     monophonic_removed = 0
     if params.monophonic:

@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from difflib import SequenceMatcher
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 
@@ -33,6 +33,7 @@ MISMATCH = -1.0
 GAP = -0.4
 WORD_PACE_S = 0.35          # duration given to a word placed without a match
 MAX_PACE_S = 1.2            # slower than this, unmatched words hug their anchor instead of spreading
+LINE_MAX_GAP_S = 6.0        # two words of one sung line are never this far apart
 INSTRUMENTAL_MIN_S = 4.0    # a gap between sung lines longer than this gets its own chords line
 CHORDS_PER_ROW = 8
 
@@ -92,7 +93,9 @@ def transcribe_words(
     import torch
     import whisper
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    from app.pipeline import model_downloads
+
+    device ="cuda" if torch.cuda.is_available() else "cpu"
     attempts = [(model_name, device)]
     if device == "cuda":
         attempts += [("small", "cuda"), ("small", "cpu")]
@@ -102,6 +105,7 @@ def transcribe_words(
         try:
             if dev == "cuda":
                 torch.cuda.empty_cache()
+            model_downloads.ensure_whisper(name)  # first run: download with progress for the UI
             model = whisper.load_model(name, device=dev)
             result = model.transcribe(
                 audio.astype(np.float32),
@@ -192,6 +196,50 @@ def align_tokens(a: list[str], b: list[str]) -> list[Optional[int]]:
     return out
 
 
+def _drop_line_outliers(words: list[dict[str, Any]], line_of: list[int]) -> int:
+    """Within a line, matches far from the rest (a word Whisper "heard" during a solo) are
+    unmatched, so _fill_times puts them next to their line. Keeps the biggest cluster of
+    matches (the first one on a tie). Returns how many matches were dropped. In place."""
+    dropped = 0
+    by_line: dict[int, list[int]] = {}
+    for i, li in enumerate(line_of):
+        if words[i]["matched"]:
+            by_line.setdefault(li, []).append(i)
+    for idx in by_line.values():
+        clusters = [[idx[0]]]
+        for prev, cur in zip(idx, idx[1:]):
+            if words[cur]["start"] - words[prev]["end"] > LINE_MAX_GAP_S:
+                clusters.append([cur])
+            else:
+                clusters[-1].append(cur)
+        if len(clusters) == 1:
+            continue
+        keep = max(clusters, key=len)
+        for c in clusters:
+            if c is not keep:
+                for i in c:
+                    words[i]["matched"] = False
+                    dropped += 1
+    return dropped
+
+
+def repair_lines(lines: list[dict[str, Any]]) -> bool:
+    """Saved timed lines with the outlier fix applied (for lyrics aligned before it). In place;
+    True when something changed."""
+    flat = [w for line in lines for w in line["words"]]
+    line_of = [li for li, line in enumerate(lines) for _ in line["words"]]
+    if not flat or not any(w["matched"] for w in flat) or not _drop_line_outliers(flat, line_of):
+        return False
+    _fill_times(flat, line_of)
+    for line in lines:
+        for w in line["words"]:
+            w["start"], w["end"] = round(w["start"], 3), round(w["end"], 3)
+        ws = line["words"]
+        line["start"], line["end"] = ws[0]["start"], ws[-1]["end"]
+        line["matched_share"] = round(sum(w["matched"] for w in ws) / len(ws), 2)
+    return True
+
+
 def _fill_times(
     words: list[dict[str, Any]], line_of: list[int]
 ) -> None:
@@ -264,6 +312,7 @@ def align_lyrics(text: str, heard: list[dict[str, Any]]) -> list[dict[str, Any]]
     for w, j in zip(flat, mapping):
         if j is not None:
             w["start"], w["end"], w["matched"] = heard[j]["start"], heard[j]["end"], True
+    _drop_line_outliers(flat, line_of)
     _fill_times(flat, line_of)
     lines = []
     for li, line in enumerate(parsed):
@@ -315,12 +364,14 @@ def lines_to_text(lines: list[dict[str, Any]]) -> str:
 
 PART_GAP_S = 8.0          # a pause in the singing this long between blocks is an instrumental part
 TAGGED_GAP_S = 2.0        # ... or this long when an empty tag ([Solo], [Intro]) names it
+CONFIRMED_GAP_S = 3.5     # ... or this long when the music says it is a solo / breakdown (classify)
 UNTAGGED_SPLIT_S = 3.0    # no tags nor blank lines: a pause this long between lines starts a new block
 LEAD_IN_S = 0.3           # a section starts a little before its first sung word
 SNAP_BEFORE_S = 1.5       # a chord change this close before the first word is the section's start
 SNAP_PICKUP_S = 0.25      # ... or this close after it (the word was sung just ahead of the beat)
 REPEAT_SIM = 0.75         # blocks this similar (text) are the same section: the chorus
 MIN_SECTION_S = 0.5
+INTRO_MIN_S = 2.0         # the voice starting this late: what comes before it is the intro
 
 
 def _outline(text: str) -> list[tuple[Optional[str], int]]:
@@ -407,21 +458,45 @@ def _snap(t: float, lo: float, hi: float, changes: list[float]) -> Optional[floa
     return min(inside, key=lambda c: abs(c - t)) if inside else None
 
 
+def retag_lines(text: str, lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The timed lines with the section tags / stanza breaks of ``text`` (same words, new tags).
+
+    Raises LyricsError when the words changed: then the lyrics must be aligned again."""
+    parsed = parse_lyrics(text)
+    same = len(parsed) == len(lines) and all(
+        [norm_word(w) for w in p["words"]] == [norm_word(w["text"]) for w in line["words"]]
+        for p, line in zip(parsed, lines)
+    )
+    if not same:
+        raise LyricsError("As palavras da letra mudaram: alinhe a letra de novo com a voz.")
+    return [{**line, "section": p["section"], "new_section": p["new_section"], "para": p["para"]}
+            for p, line in zip(parsed, lines)]
+
+
 def infer_sections(
-    text: str, lines: list[dict[str, Any]], chords: list[dict[str, Any]], duration: float
+    text: str, lines: list[dict[str, Any]], chords: list[dict[str, Any]], duration: float,
+    classify: Optional[Callable[[float, float], Optional[dict[str, str]]]] = None,
 ) -> list[dict[str, Any]]:
     """The song's parts from the timed lyrics: [{name, start, end, kind, source}] covering 0..duration.
 
     kind: "sung" or "instrumental"; source: "tag" (named by the lyrics), "repeat" (same text as
-    another block: the chorus), "gap" (a long pause in the singing) or "guess" (an untagged block)."""
+    another block: the chorus), "gap" (a long pause in the singing), "guess" (an untagged block) or
+    "inferred" (an untagged instrumental stretch that ``classify(start, end)`` named, e.g. "Solo";
+    it then also carries ``why``)."""
     if not lines:
         return []
     blocks, tail_names = _blocks(text, lines)
     _name_blocks(blocks)
     changes = sorted({round(c["start"], 3) for c in chords if c.get("start", 0) > 0})
     duration = max(duration, lines[-1]["end"])
+    index_of = {id(line): i for i, line in enumerate(lines)}
     for b in blocks:
         b["first"], b["last"] = b["lines"][0]["start"], b["lines"][-1]["end"]
+        b["range"] = [index_of[id(b["lines"][0])], index_of[id(b["lines"][-1])] + 1]
+
+    def sung(b: dict[str, Any], start: float) -> dict[str, Any]:
+        """A sung section; ``lines`` = [first, last + 1] indices of its lyric lines."""
+        return {"name": b["name"], "kind": "sung", "source": b["source"], "start": start, "lines": b["range"]}
 
     def start_of(b: dict[str, Any], floor: float) -> float:
         t = b["first"]
@@ -441,26 +516,36 @@ def infer_sections(
 
     sections: list[dict[str, Any]] = []
     first = blocks[0]
-    if is_part(first["first"], first["gap_names"]):
+    sung_intro = (first["name"] or "").lower().startswith("intro")  # the lyrics call the first block the intro
+    if not sung_intro and (first["first"] >= INTRO_MIN_S or is_part(first["first"], first["gap_names"])):
         sections.append({**instrumental(first["gap_names"], "Intro"), "start": 0.0})
-        sections.append({"name": first["name"], "kind": "sung", "source": first["source"],
-                         "start": start_of(first, 0.0)})
+        sections.append(sung(first, start_of(first, 0.0)))
     else:
-        sections.append({"name": first["name"], "kind": "sung", "source": first["source"], "start": 0.0})
+        sections.append(sung(first, 0.0))
     for cur, nxt in zip(blocks, blocks[1:]):
         gap = nxt["first"] - cur["last"]
-        if is_part(gap, nxt["gap_names"]):
-            sections.append({**instrumental(nxt["gap_names"], "Instrumental"), "start": tail_of(cur, nxt["first"])})
+        confirmed = (not nxt["gap_names"] and classify is not None and CONFIRMED_GAP_S <= gap < PART_GAP_S
+                     and classify(cur["last"], nxt["first"]) is not None)
+        if confirmed or is_part(gap, nxt["gap_names"]):
+            sections.append({**instrumental(nxt["gap_names"], "Instrumental"), "start": tail_of(cur, nxt["first"]),
+                             "nameless": not nxt["gap_names"]})
             floor = sections[-1]["start"]
         else:
             floor = cur["last"]
-        sections.append({"name": nxt["name"], "kind": "sung", "source": nxt["source"], "start": start_of(nxt, floor)})
+        sections.append(sung(nxt, start_of(nxt, floor)))
     last = blocks[-1]
     if is_part(duration - last["last"], tail_names):
         sections.append({**instrumental(tail_names, "Outro"), "start": tail_of(last, duration)})
     for s, nxt in zip(sections, sections[1:] + [None]):
         s["end"] = nxt["start"] if nxt else duration
-    sections = [s for s in sections if s["end"] - s["start"] >= MIN_SECTION_S]
+        s["start"], s["end"] = round(s["start"], 2), round(s["end"], 2)
+    sections = [s for s in sections if round(s["end"] - s["start"], 3) >= MIN_SECTION_S]
+    # untagged instrumental stretches in the middle: Solo / Breakdown / ... when the music says so
+    for s in sections:
+        if s.pop("nameless", False) and classify:
+            guess = classify(s["start"], s["end"])
+            if guess:
+                s.update(name=guess["name"], source="inferred", why=guess["why"])
     # the same name more than once (Refrão, Refrão): number the occurrences
     counts: dict[str, int] = {}
     for s in sections:
@@ -470,8 +555,124 @@ def infer_sections(
         if counts[s["name"]] > 1:
             seen[s["name"]] = seen.get(s["name"], 0) + 1
             s["name"] = f"{s['name']} ({seen[s['name']]})"
-        s["start"], s["end"] = round(s["start"], 2), round(s["end"], 2)
     return sections
+
+
+# ---------- voice onsets (Whisper starts a line too early after a pause) ----------
+
+ONSET_HOP_S = 0.01
+ONSET_SILENCE_S = 0.2       # this much quiet before a voiced frame makes it an onset
+ONSET_DB_BELOW_PEAK = 32.0  # "voiced": within this many dB of the loud part of the vocals
+ONSET_LOOK_BEFORE_S = 0.4   # an onset may sit this much before Whisper's start...
+ONSET_LOOK_AFTER_S = 1.6    # ...or this much after it
+
+
+def voice_activity(vocals: np.ndarray, sr: int) -> dict[str, Any]:
+    """{"onsets": times where the voice comes back after a pause, "voiced": per-frame bool,
+    "hop": frame length in s}, from the loudness of the vocals."""
+    import librosa
+
+    hop = max(1, int(sr * ONSET_HOP_S))
+    rms = librosa.feature.rms(y=vocals, frame_length=hop * 4, hop_length=hop)[0]
+    if not len(rms) or float(rms.max()) <= 0:
+        return {"onsets": [], "voiced": np.zeros(0, bool), "hop": hop / sr}
+    db = librosa.amplitude_to_db(rms, ref=float(np.percentile(rms, 98)) or float(rms.max()))
+    voiced = db > -ONSET_DB_BELOW_PEAK
+    need = int(ONSET_SILENCE_S / ONSET_HOP_S)
+    onsets, quiet = [], need  # the song start counts as a pause
+    for i, v in enumerate(voiced):
+        if v:
+            if quiet >= need:
+                onsets.append(round(i * hop / sr, 3))
+            quiet = 0
+        else:
+            quiet += 1
+    return {"onsets": onsets, "voiced": voiced, "hop": hop / sr}
+
+
+ONSET_MAX_VOICED_SKIP = 0.15  # the stretch skipped over must be (almost) silent
+
+
+def refine_line_starts(lines: list[dict[str, Any]], activity: dict[str, Any]) -> int:
+    """Moves a line's first words to the voice onset when Whisper put them in the silence before
+    it (typical after an instrumental stretch). Only when the time skipped over is silent in the
+    vocals, so a pause inside a sung phrase is never mistaken for the start. In place; returns how
+    many lines moved."""
+    onsets, voiced, hop = activity["onsets"], activity["voiced"], activity["hop"]
+    moved = 0
+    prev_end = 0.0
+    for line in lines:
+        start = line["start"]
+        cand = [o for o in onsets if start - ONSET_LOOK_BEFORE_S <= o <= start + ONSET_LOOK_AFTER_S and o >= prev_end]
+        onset = min(cand, key=lambda o: (o < start, abs(o - start))) if cand else None  # prefer the one after
+        if onset is not None and onset > start + 0.05:
+            a, b = int(start / hop), int(onset / hop)
+            skipped = voiced[a:b]
+            if len(skipped) and float(skipped.mean()) <= ONSET_MAX_VOICED_SKIP:
+                for w in line["words"]:
+                    if w["start"] >= onset:
+                        break
+                    w["start"] = onset
+                    w["end"] = max(w["end"], onset + 0.1)
+                for x, y in zip(line["words"], line["words"][1:]):  # keep the words in order
+                    if y["start"] < x["end"]:
+                        y["start"] = x["end"]
+                        y["end"] = max(y["end"], y["start"] + 0.05)
+                line["start"] = line["words"][0]["start"]
+                line["end"] = max(line["end"], line["words"][-1]["end"])
+                moved += 1
+        prev_end = line["end"]
+    return moved
+
+
+# ---------- a stanza moved into its part (the user changed the part's bounds) ----------
+
+FIT_MIN_SPAN_S = 0.6  # the stretch the words are squeezed into is at least this long
+FIT_TOLERANCE_S = 0.35  # a pickup sung this little before the part (or a tail after it) stays
+
+
+def _remap_times(lines: list[dict[str, Any]], a: float, b: float, a2: float, b2: float) -> None:
+    """Every word / line time in [a, b] mapped linearly onto [a2, b2] (in place)."""
+    scale = (b2 - a2) / (b - a) if b > a else 0.0
+
+    def f(t: float) -> float:
+        return round(a2 + (t - a) * scale, 3) if a - 1e-6 <= t <= b + 1e-6 else t
+
+    for line in lines:
+        for w in line["words"]:
+            w["start"], w["end"] = f(w["start"]), f(w["end"])
+        line["start"], line["end"] = line["words"][0]["start"], line["words"][-1]["end"]
+
+
+def fit_lines_to_range(lines: list[dict[str, Any]], first: int, last: int, start: float, end: float) -> int:
+    """Pulls the lyric lines ``lines[first:last]`` (one stanza) inside [start, end]: the words sung
+    before ``start`` are squeezed into the beginning of the range, the ones after ``end`` into its
+    end; the words already inside keep their time. In place; returns how many lines changed."""
+    block = lines[first:last]
+    if not block or end - start < FIT_MIN_SPAN_S:
+        return 0
+    before = [l for l in block if l["start"] < start - 1e-3]
+    after = [l for l in block if l["end"] > end + 1e-3]
+    if before and before[0]["start"] >= start - FIT_TOLERANCE_S:
+        before = []
+    if after and after[-1]["end"] <= end + FIT_TOLERANCE_S:
+        after = []
+    if before:
+        # squeeze [first word, b] onto [start, b]; b = end of the last early line (>= start + min span)
+        nxt = next((l["start"] for l in block if l["start"] >= start - 1e-3), None)
+        b = max(before[-1]["end"], start + FIT_MIN_SPAN_S)
+        if nxt is not None:
+            b = min(b, nxt)
+        b = min(max(b, start + 0.1), end)
+        _remap_times(before, before[0]["start"], b, start, b)
+    if after:
+        prv = next((l["end"] for l in reversed(block) if l["end"] <= end + 1e-3), None)
+        a = min(after[0]["start"], end - FIT_MIN_SPAN_S)
+        if prv is not None:
+            a = max(a, prv)
+        a = max(min(a, end - 0.1), start)
+        _remap_times(after, a, after[-1]["end"], a, end)
+    return len({id(l) for l in before + after})
 
 
 # ---------- chord sheet ----------

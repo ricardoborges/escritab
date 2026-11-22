@@ -24,7 +24,10 @@ def soundfont_dirs() -> list[Path]:
 def read_presets(path: Path) -> list[dict[str, Any]]:
     """Preset headers (bank, program, name) from the pdta/phdr chunk of a SoundFont."""
     with open(path, "rb") as f:
-        riff, size, form = struct.unpack("<4sI4s", f.read(12))
+        header = f.read(12)
+        if len(header) < 12:
+            raise ValueError("not a SoundFont")
+        riff, size, form = struct.unpack("<4sI4s", header)
         if riff != b"RIFF" or form not in (b"sfbk", b"sfpk"):
             raise ValueError("not a SoundFont")
         end = 8 + size
@@ -36,7 +39,10 @@ def read_presets(path: Path) -> list[dict[str, Any]]:
             if cid == b"LIST" and f.read(4) == b"pdta":
                 stop = f.tell() + csz - 4
                 while f.tell() < stop:
-                    sid, ssz = struct.unpack("<4sI", f.read(8))
+                    subhead = f.read(8)
+                    if len(subhead) < 8:
+                        break
+                    sid, ssz = struct.unpack("<4sI", subhead)
                     if sid == b"phdr":
                         data = f.read(ssz)
                         out = []
@@ -99,24 +105,39 @@ INFO_IDS = {b"ifil", b"isng", b"INAM", b"irom", b"iver", b"ICRD", b"IENG", b"IPR
 def _clean_info(path: Path) -> tuple[bytes, int, int] | None:
     """If the INFO list has sub-chunks outside the SF2 spec (some editors nest a LIST in it, which
     FluidSynth rejects), return (fixed INFO chunk, its start, its end) in the file; else None."""
-    with open(path, "rb") as f:
-        f.seek(12)
-        cid, csz = struct.unpack("<4sI", f.read(8))
-        if cid != b"LIST" or f.read(4) != b"INFO":
-            return None
-        start, stop = 12, 20 + csz
-        kept, dirty = [], False
-        while f.tell() < stop:
-            sid, ssz = struct.unpack("<4sI", f.read(8))
-            data = f.read(ssz + (ssz & 1))
-            if sid in INFO_IDS:
-                kept.append(sid + struct.pack("<I", ssz) + data)
-            else:
-                dirty = True
-        if not dirty:
-            return None
-        body = b"INFO" + b"".join(kept)
-        return b"LIST" + struct.pack("<I", len(body)) + body, start, stop
+    try:
+        file_size = path.stat().st_size
+        with open(path, "rb") as f:
+            f.seek(12)
+            head = f.read(8)
+            if len(head) < 8:
+                return None
+            cid, csz = struct.unpack("<4sI", head)
+            if cid != b"LIST" or f.read(4) != b"INFO":
+                return None
+            start, stop = 12, 20 + csz
+            if stop > file_size:
+                return None
+            kept, dirty = [], False
+            while f.tell() < stop:
+                subhead = f.read(8)
+                if len(subhead) < 8:
+                    return None
+                sid, ssz = struct.unpack("<4sI", subhead)
+                need = ssz + (ssz & 1)
+                data = f.read(need)
+                if len(data) < need:
+                    return None
+                if sid in INFO_IDS:
+                    kept.append(sid + struct.pack("<I", ssz) + data)
+                else:
+                    dirty = True
+            if not dirty or f.tell() != stop:
+                return None
+            body = b"INFO" + b"".join(kept)
+            return b"LIST" + struct.pack("<I", len(body)) + body, start, stop
+    except (OSError, struct.error):
+        return None
 
 
 def servable_path(path: Path, cache_dir: Path) -> Path:

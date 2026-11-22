@@ -9,7 +9,9 @@ from app.job_manager import JobManager
 import shutil
 from app.models import (
     JobMetadata,
+    LyricsDraft,
     LyricsRequest,
+    LyricsTags,
     MultitrackRequest,
     PartCreate,
     PartGenerate,
@@ -20,7 +22,7 @@ from app.models import (
 )
 from app import projects
 from app.projects import PartError
-from app.pipeline import dettato_transcriber
+from app.pipeline import dettato_transcriber, genius, model_downloads
 from app.pipeline.stem_separator import separate_stems
 from app.system_info import get_compute_info
 from app import soundfonts
@@ -42,6 +44,11 @@ def create_app(workspace_root: Path | str = Path("workspace/jobs")) -> FastAPI:
     @app.get("/api/system")
     def system_info():
         return get_compute_info()
+
+    @app.get("/api/downloads")
+    def model_downloads_status():
+        """Model weights being downloaded now (first run of Whisper / Demucs / Dettato...)."""
+        return {"downloads": model_downloads.active_downloads()}
 
     @app.get("/api/soundfonts")
     def list_soundfonts():
@@ -155,6 +162,16 @@ def create_app(workspace_root: Path | str = Path("workspace/jobs")) -> FastAPI:
             manager.save_job(job)
         return FileResponse(path=str(job_dir / projects.PEAKS_FILE), media_type="application/json")
 
+    @app.get("/api/projects/{project_id}/mix")
+    def get_stems_mix(project_id: str, stems: str = ""):
+        """The chosen stems played together (stems=bass,guitar), for the player."""
+        job, job_dir = load(project_id)
+        try:
+            path = projects.stems_mix(job, job_dir, [s for s in stems.split(",") if s])
+        except PartError as exc:
+            raise part_error(exc) from exc
+        return FileResponse(path, media_type="audio/wav")
+
     @app.get("/api/projects/{project_id}/files/{filename}")
     def get_project_file(project_id: str, filename: str):
         _, job_dir = load(project_id)
@@ -174,6 +191,7 @@ def create_app(workspace_root: Path | str = Path("workspace/jobs")) -> FastAPI:
             )
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"Falha ao separar stems: {exc}") from exc
+        job, _ = load(project_id)
         job.stems = stems_map
         job.separation_device = device
         for cache in job_dir.glob("stem_notes_*.json"):  # new stems: old stem transcriptions are stale
@@ -198,6 +216,7 @@ def create_app(workspace_root: Path | str = Path("workspace/jobs")) -> FastAPI:
             )
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"Falha na transcrição multi-instrumento: {exc}") from exc
+        job, _ = load(project_id)
         job.multitrack = tracks
         job.artifacts["multitrack_midi"] = full_midi.name
         job.artifacts["multitrack_json"] = full_midi.with_suffix(".json").name
@@ -225,11 +244,43 @@ def create_app(workspace_root: Path | str = Path("workspace/jobs")) -> FastAPI:
             raise HTTPException(status_code=500, detail=f"Falha na análise harmônica: {exc}") from exc
         return {"harmony": result}
 
+    @app.get("/api/lyrics/search")
+    def search_lyrics(q: str = "", limit: int = 10):
+        """Songs on Genius matching the query (title / artist), for the user to pick one."""
+        try:
+            return {"results": genius.search(q, limit=min(max(limit, 1), 20))}
+        except genius.GeniusError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.get("/api/lyrics/genius/{song_id}")
+    def genius_lyrics(song_id: int):
+        """Plain-text lyrics of one Genius song (to fill the lyrics box; nothing is saved)."""
+        try:
+            return genius.fetch_lyrics(song_id)
+        except genius.GeniusError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
     @app.get("/api/projects/{project_id}/lyrics")
     def get_lyrics(project_id: str):
         """Saved lyrics (timed lines) and the chord sheet; nulls when no lyrics were loaded."""
         job, job_dir = load(project_id)
         return projects.lyrics_payload(job, job_dir)
+
+    @app.patch("/api/projects/{project_id}/lyrics/sections")
+    def retag_lyrics(project_id: str, req: LyricsTags):
+        """New [Verso]/[Refrão] tags on the aligned lyrics: the timing stays, no Whisper run."""
+        job, job_dir = load(project_id)
+        try:
+            projects.retag_project_lyrics(job_dir, req.text)
+        except PartError as exc:
+            raise part_error(exc) from exc
+        return projects.lyrics_payload(job, job_dir)
+
+    @app.put("/api/projects/{project_id}/lyrics/draft")
+    def save_lyrics_draft(project_id: str, req: LyricsDraft):
+        """Keeps the lyrics text (from Genius, typed, tagged) until it is aligned with the voice."""
+        _, job_dir = load(project_id)
+        return {"draft": projects.save_lyrics_draft(job_dir, req.text, req.language, req.source)}
 
     @app.post("/api/projects/{project_id}/lyrics")
     def align_lyrics(project_id: str, req: LyricsRequest):
@@ -248,28 +299,37 @@ def create_app(workspace_root: Path | str = Path("workspace/jobs")) -> FastAPI:
 
     @app.post("/api/projects/{project_id}/parts")
     def create_part(project_id: str, req: PartCreate):
-        job, _ = load(project_id)
+        job, job_dir = load(project_id)
+        changes: list[str] = []
         try:
-            part = projects.new_part(job, req.name, req.start, req.end)
+            if req.fit:
+                part, changes = projects.insert_part_fitted(job, job_dir, req.name, req.start, req.end)
+            else:
+                part = projects.new_part(job, req.name, req.start, req.end)
         except PartError as exc:
             raise part_error(exc) from exc
         manager.save_job(job)
-        return {"job": job, "part": part}
+        lyrics_changes = projects.fit_lyrics_to_parts(job, job_dir) if req.fit else []
+        return {"job": job, "part": part, "changes": changes + lyrics_changes,
+                "lyrics_changed": bool(lyrics_changes)}
 
     @app.post("/api/projects/{project_id}/parts/from-lyrics")
-    def create_parts_from_lyrics(project_id: str):
-        """One part per section of the aligned lyrics ([Verse], [Chorus]... or inferred)."""
+    def create_parts_from_lyrics(project_id: str, only_intro: bool = False):
+        """One part per section of the aligned lyrics ([Verse], [Chorus]... or inferred);
+        only_intro=true creates just the intro (start of the song up to the first stanza)."""
         job, job_dir = load(project_id)
         try:
-            created = projects.parts_from_lyrics(job, job_dir)
+            updated: list = []
+            created = projects.parts_from_lyrics(job, job_dir, only_intro=only_intro, updated=updated)
         except PartError as exc:
             raise part_error(exc) from exc
         manager.save_job(job)
-        return {"job": job, "created": len(created)}
+        return {"job": job, "created": len(created), "updated": len(updated)}
 
     @app.patch("/api/projects/{project_id}/parts/{part_id}")
     def update_part(project_id: str, part_id: str, req: PartUpdate):
         job, job_dir = load(project_id)
+        lyrics_changes: list[str] = []
         try:
             part = projects.find_part(job, part_id)
             if req.name is not None:
@@ -284,10 +344,11 @@ def create_app(workspace_root: Path | str = Path("workspace/jobs")) -> FastAPI:
                     part.start, part.end = start, end
                     projects.clear_outputs(job_dir, part)  # the old tab no longer matches the excerpt
                     job.parts.sort(key=lambda p: (p.start, p.created_at))
+                    lyrics_changes = projects.fit_lyrics_to_parts(job, job_dir)
         except PartError as exc:
             raise part_error(exc) from exc
         manager.save_job(job)
-        return {"job": job, "part": part}
+        return {"job": job, "part": part, "changes": lyrics_changes, "lyrics_changed": bool(lyrics_changes)}
 
     @app.delete("/api/projects/{project_id}/parts/{part_id}")
     def delete_part(project_id: str, part_id: str):
@@ -332,9 +393,20 @@ def create_app(workspace_root: Path | str = Path("workspace/jobs")) -> FastAPI:
     @app.get("/", response_class=HTMLResponse)
     def index_page():
         index_file = static_dir / "index.html"
-        if index_file.exists():
-            return index_file.read_text(encoding="utf-8")
-        return "<h1>EscriTab Backend Active</h1>"
+        if not index_file.exists():
+            return "<h1>EscriTab Backend Active</h1>"
+        html = index_file.read_text(encoding="utf-8")
+
+        # Cache-bust local assets with their mtime, so the browser never pairs a new
+        # index.html with a stale app.js/styles.css (missing element -> null errors).
+        def versioned(match: re.Match) -> str:
+            asset = static_dir / match.group(2)
+            if not asset.is_file():
+                return match.group(0)
+            return f'{match.group(1)}/static/{match.group(2)}?v={int(asset.stat().st_mtime)}"'
+
+        html = re.sub(r'((?:src|href)=")/static/([\w./-]+\.(?:js|css))"', versioned, html)
+        return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
     return app

@@ -101,3 +101,70 @@ def test_segment_notes_uses_the_scale_for_an_out_of_tune_note():
     assert plain == [69, 71, 76]
     assert biased == [69, 72, 76]
     assert stats["scale_corrected"] == 1
+
+
+def test_crepe_restores_cudnn_flags(monkeypatch):
+    import torch
+    import torchcrepe
+
+    orig_bench = torch.backends.cudnn.benchmark
+    orig_det = torch.backends.cudnn.deterministic
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.deterministic = False
+    try:
+        monkeypatch.setattr(
+            torchcrepe, "predict",
+            lambda audio, sr, hop, fmin, fmax, **kw: (torch.full((1, 21), 440.0), torch.full((1, 21), 0.9)),
+        )
+        lt._crepe(np.zeros(1600, dtype=np.float32), 70.0, 1400.0)
+        assert torch.backends.cudnn.benchmark is True
+        assert torch.backends.cudnn.deterministic is False
+    finally:
+        torch.backends.cudnn.benchmark = orig_bench
+        torch.backends.cudnn.deterministic = orig_det
+
+
+def test_segment_notes_repairs_octave_drop_glitches_and_filters_low_bleed():
+    # Solo phrase in the upper register (D5=74, C#5=73, B4=71) with:
+    # 1) a subharmonic octave-drop glitch (C#4=61 between D5 and D5, or C#5 -> C#4 -> C#5)
+    # 2) quiet low rhythm-guitar chug bleed (F#3=54 / B2=47) during a pause
+    track = _track([
+        (74.0, 0.16),
+        (61.0, 0.14),   # 1-octave drop glitch from C#5 (73)
+        (74.0, 0.16),
+        (73.0, 0.16),
+        (61.0, 0.14),   # 1-octave drop glitch right after C#5 (73) and before C#5 (73)
+        (73.0, 0.16),
+        (71.0, 0.30),
+        (54.0, 0.12),   # low rhythm bleed (F#3, well below the solo register)
+    ])
+    # Make the low rhythm bleed quieter than the solo
+    track.rms[-int(0.12 / lt.HOP_S):] = 0.22
+    notes = lt.segment_notes(track, 0.05)
+    pitches = [n.pitch for n in notes]
+    # Octave-drop glitches (61) should be repaired to 73, and low rhythm bleed (54) dropped
+    assert 61 not in pitches, pitches
+    assert 54 not in pitches, pitches
+    assert 73 in pitches and 74 in pitches and 71 in pitches
+
+
+def test_segment_notes_repairs_consecutive_alternating_octave_drops():
+    # Real-world case from distorted lead: D5(74) -> C#4(61, -13 st) -> D5(74)
+    # and C#5(73) -> C#4(61, -12 st) -> C#5(73) -> B3(59, -14 st from C#5 and -12 st from B4) -> B4(71)
+    from app.models import NoteEvent
+    raw = [
+        NoteEvent(pitch=74, start=0.08, end=0.23, velocity=108),
+        NoteEvent(pitch=61, start=0.23, end=0.39, velocity=106),
+        NoteEvent(pitch=74, start=0.41, end=0.58, velocity=108),
+        NoteEvent(pitch=73, start=1.26, end=1.43, velocity=107),
+        NoteEvent(pitch=61, start=1.43, end=1.59, velocity=55),
+        NoteEvent(pitch=73, start=1.59, end=1.77, velocity=78),
+        NoteEvent(pitch=59, start=1.77, end=1.94, velocity=53),
+        NoteEvent(pitch=71, start=1.94, end=2.11, velocity=110),
+    ]
+    cleaned = lt._clean_lead_notes(raw)
+    assert [n.pitch for n in cleaned] == [74, 73, 74, 73, 73, 73, 71, 71]
+
+
+
+

@@ -100,3 +100,63 @@ def test_monophonic_reduction_keeps_one_voice():
     assert [n.pitch for n in out] == [64, 69]
     assert out[0].end == 0.40
     assert out[1].bend == 2.0
+
+
+def test_postprocess_suppresses_power_chord_overtones_and_syncs_chord_onsets():
+    # F#5 power chord (42, 49, 54) with a distorted 3rd-harmonic overtone at C#4 (61 = 42+19 = 49+12)
+    # whose velocity (77) is slightly above 0.75 * 96 (72), plus a 35ms onset spread across strings.
+    raw = [
+        NoteEvent(pitch=42, start=0.100, end=0.26, velocity=96),
+        NoteEvent(pitch=49, start=0.118, end=0.26, velocity=88),
+        NoteEvent(pitch=54, start=0.132, end=0.26, velocity=91),
+        NoteEvent(pitch=61, start=0.135, end=0.25, velocity=77),  # overtone of power chord (42+19 and 49+12)
+    ]
+    params = TranscriptionParams(
+        minimum_note_length_ms=60.0,
+        suppress_harmonics=True,
+        harmonic_velocity_ratio=0.75,
+        tuning="standard_e",
+    )
+    cleaned, stats = postprocess_notes(raw, params)
+    assert [n.pitch for n in cleaned] == [42, 49, 54]
+    assert stats["harmonics_removed"] == 1
+    # Onsets of a simultaneous chord are aligned so exporters don't split them across grid points
+    assert len({round(n.start, 4) for n in cleaned}) == 1
+
+
+def test_postprocess_removes_high_chord_overtone_even_at_high_velocity():
+    # In a 3-note power chord (42, 49, 54), a 4th note at 61 (+19 above 42 AND +12 above 49)
+    # with velocity 92 (95.8% of 96) is still a chord overtone and must be removed.
+    raw = [
+        NoteEvent(pitch=42, start=1.279, end=1.592, velocity=96),
+        NoteEvent(pitch=49, start=1.279, end=1.595, velocity=88),
+        NoteEvent(pitch=54, start=1.279, end=1.598, velocity=95),
+        NoteEvent(pitch=61, start=1.279, end=1.592, velocity=92),
+    ]
+    params = TranscriptionParams(suppress_harmonics=True, harmonic_velocity_ratio=0.75)
+    cleaned, stats = postprocess_notes(raw, params)
+    assert [n.pitch for n in cleaned] == [42, 49, 54]
+    assert stats["harmonics_removed"] == 1
+
+
+def test_monophonic_reduction_keeps_octave_consistency_in_octave_doubled_lines():
+    from app.pipeline.midi_transcriber import reduce_to_monophonic
+
+    # Dettato track with simultaneous octave doublings (62/74, 61/73, 59/71) where the lower
+    # octave happens to have slightly higher velocity on some attacks (61 vel 106 vs 73 vel 95)
+    notes = [
+        NoteEvent(pitch=62, start=0.08, end=0.23, velocity=100),
+        NoteEvent(pitch=74, start=0.08, end=0.23, velocity=108),
+        NoteEvent(pitch=61, start=0.24, end=0.39, velocity=106),
+        NoteEvent(pitch=73, start=0.25, end=0.40, velocity=95),
+        NoteEvent(pitch=62, start=0.41, end=0.57, velocity=98),
+        NoteEvent(pitch=74, start=0.42, end=0.58, velocity=108),
+        NoteEvent(pitch=59, start=0.59, end=0.90, velocity=90),
+        NoteEvent(pitch=71, start=0.59, end=0.90, velocity=98),
+    ]
+    out = reduce_to_monophonic(notes)
+    # Must stay in the same octave (74, 73, 74, 71), not jump down an octave to 61 in the middle!
+    assert [n.pitch for n in out] == [74, 73, 74, 71]
+
+
+

@@ -61,22 +61,28 @@ def _crepe(y: np.ndarray, fmin: float, fmax: float) -> tuple[np.ndarray, np.ndar
     import torchcrepe
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    prev_bench = torch.backends.cudnn.benchmark
+    prev_det = torch.backends.cudnn.deterministic
     # same audio -> same notes: cuDNN autotuning picks kernels per run and their sums differ slightly
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
-    audio = torch.from_numpy(y.astype(np.float32))[None]
-    f0, per = torchcrepe.predict(
-        audio, SR, HOP, fmin, fmax, model="full",
-        decoder=torchcrepe.decode.viterbi, return_periodicity=True,
-        batch_size=512, device=device,
-    )
-    per = torchcrepe.filter.median(per, 3)
-    per = torchcrepe.threshold.Silence(-60.0)(per, audio, SR, HOP)
-    f0 = f0[0].cpu().numpy().astype(np.float64)
-    per = per[0].cpu().numpy().astype(np.float64)
-    if device == "cuda":
-        torch.cuda.empty_cache()
-    return f0, per
+    try:
+        audio = torch.from_numpy(y.astype(np.float32))[None]
+        f0, per = torchcrepe.predict(
+            audio, SR, HOP, fmin, fmax, model="full",
+            decoder=torchcrepe.decode.viterbi, return_periodicity=True,
+            batch_size=512, device=device,
+        )
+        per = torchcrepe.filter.median(per, 3)
+        per = torchcrepe.threshold.Silence(-60.0)(per, audio, SR, HOP)
+        f0 = f0[0].cpu().numpy().astype(np.float64)
+        per = per[0].cpu().numpy().astype(np.float64)
+        if device == "cuda":
+            torch.cuda.empty_cache()
+        return f0, per
+    finally:
+        torch.backends.cudnn.benchmark = prev_bench
+        torch.backends.cudnn.deterministic = prev_det
 
 
 def _pyin(y: np.ndarray, fmin: float, fmax: float) -> tuple[np.ndarray, np.ndarray]:
@@ -250,6 +256,35 @@ def quantize(x, pen: np.ndarray | None):
     return int(q) if q.ndim == 0 else q
 
 
+def _clean_lead_notes(notes: list[NoteEvent]) -> list[NoteEvent]:
+    """Repair subharmonic octave-drop glitches and drop quiet low rhythm-guitar bleed in upper-register solos."""
+    if len(notes) < 3:
+        return notes
+    out = [n.model_copy() for n in notes]
+    # 1. Subharmonic octave drops: a short note ~12 semitones below both its immediate neighbours
+    for i in range(1, len(out) - 1):
+        prev_n, cur_n, next_n = out[i - 1], out[i], out[i + 1]
+        if cur_n.end - cur_n.start > 0.35:
+            continue
+        if cur_n.start - prev_n.end > 0.25 or next_n.start - cur_n.end > 0.25:
+            continue
+        up = cur_n.pitch + 12
+        if abs(up - prev_n.pitch) <= 3 and abs(up - next_n.pitch) <= 3:
+            out[i] = cur_n.model_copy(update={"pitch": up})
+
+    # 2. When the phrase is clearly an upper-register solo (median >= D4=62), drop low rhythm-guitar
+    # chug bleed (more than 10 semitones below median and quieter than the solo's median velocity)
+    pitches = np.array([n.pitch for n in out])
+    med_pitch = float(np.median(pitches))
+    if med_pitch >= 62.0:
+        med_vel = float(np.median([n.velocity for n in out]))
+        out = [
+            n for n in out
+            if not (n.pitch <= med_pitch - 12 and (n.velocity < 0.85 * med_vel or n.pitch < 55))
+        ]
+    return out
+
+
 def segment_notes(
     track: PitchTrack, min_note_s: float, scale_pcs=None, stats: dict | None = None
 ) -> list[NoteEvent]:
@@ -349,7 +384,7 @@ def segment_notes(
                 )
     if stats is not None:
         stats["scale_corrected"] = corrected
-    return notes
+    return _clean_lead_notes(notes)
 
 
 def transcribe_lead(

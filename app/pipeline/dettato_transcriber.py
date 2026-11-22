@@ -37,6 +37,9 @@ def _get_model() -> Any:
     if _model is None:
         from dettato import Dettato
 
+        from app.pipeline import model_downloads
+
+        model_downloads.ensure_dettato()  # first run: download with progress for the UI
         _model = Dettato.from_pretrained()  # cuda when available, otherwise cpu
     return _model
 

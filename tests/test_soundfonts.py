@@ -73,3 +73,15 @@ def test_nested_list_in_info_is_served_repaired(tmp_path: Path, monkeypatch):
     assert font["presets"] == [{"bank": 128, "program": 0, "name": "Drum"}]
     served = client.get(f"/api/soundfonts/{font['id']}").content
     assert served == raw                       # junk gone, everything else byte-identical
+
+
+def test_truncated_or_corrupt_info_chunk_does_not_hang_or_crash(tmp_path: Path):
+    bad_path = tmp_path / "corrupt.sf2"
+    # INFO chunk claims size 500, but file ends after 24 bytes
+    bad = b"RIFF" + struct.pack("<I", 500) + b"sfbk" + b"LIST" + struct.pack("<I", 500) + b"INFO" + b"ifil"
+    bad_path.write_bytes(bad)
+
+    # Must return None or empty without infinite loop or struct.error
+    assert soundfonts._clean_info(bad_path) is None
+    assert soundfonts.servable_path(bad_path, tmp_path / "cache") == bad_path
+

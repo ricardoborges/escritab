@@ -81,3 +81,16 @@ def test_lead_candidate_detection():
     assert not is_lead_candidate(26, False, mono_high)    # already a guitar
     assert not is_lead_candidate(40, False, chords)       # polyphonic
     assert not is_lead_candidate(40, True, mono_high)     # drums
+
+
+def test_lead_candidate_allows_octave_doubled_synth_lead():
+    # Dettato often transcribes a guitar solo as "synth lead" (program 80) with simultaneous octave doublings
+    rows = []
+    for i in range(40):
+        t = i * 0.22
+        p = 62 + (i % 7)
+        rows.append(_n(t, p, vel=100))
+        rows.append(_n(t + 0.005, p + 12, vel=85))  # octave doubling at the same onset
+    octave_doubled = np.array(rows, float)
+    assert is_lead_candidate(80, False, octave_doubled)
+

@@ -19,7 +19,7 @@ import numpy as np
 import soundfile as sf
 
 from app.models import JobMetadata, NoteEvent, Part, TabParams, TranscriptionParams
-from app.pipeline import dettato_transcriber, harmony, lead_transcriber, lyrics, scales
+from app.pipeline import dettato_transcriber, harmony, instrumental, lead_transcriber, lyrics, scales
 from app.pipeline.audio_cleaner import apply_bandpass_filter, apply_noise_gate, mix_stem_files
 from app.pipeline.exporters import export_ascii_tab, export_gp5, export_musicxml
 from app.pipeline.fretboard import optimize_fretboard
@@ -49,7 +49,10 @@ def now_iso() -> str:
 def default_name(filename: str) -> str:
     stem = Path(filename).stem
     stem = re.sub(r"^input_", "", stem)
-    return re.sub(r"[_]+", " ", stem).strip() or "Sem nome"
+    name = re.sub(r"[_]+", " ", stem).strip()
+    # "01 - Song", "1. Song", "03) Song": drop the track number ("7 Rings" / "1984" stay)
+    name = re.sub(r"^\d{1,3}\s*[-–—.)]+\s*", "", name).strip() or name
+    return name or "Sem nome"
 
 
 # ---------- audio analysis (duration, beats, waveform peaks) ----------
@@ -86,6 +89,19 @@ NON_HARMONIC_STEMS = {"drums", "vocals"}
 VOICE_PROGRAMS = set(range(52, 56)) | {85}  # choir / voice / synth voice: melody, not harmony
 
 
+def _add_signals(a: np.ndarray | None, b: np.ndarray) -> np.ndarray:
+    """Sum two 1D audio arrays, zero-padding the shorter one instead of truncating."""
+    if a is None:
+        return b.astype(np.float32, copy=True)
+    if len(a) < len(b):
+        out = b.astype(np.float32, copy=True)
+        out[: len(a)] += a
+        return out
+    out = a.astype(np.float32, copy=True)
+    out[: len(b)] += b
+    return out
+
+
 def compute_harmony(job: JobMetadata, job_dir: Path) -> dict:
     """Key, chords and harmonic field of the whole song (cached in harmony.json).
 
@@ -99,7 +115,7 @@ def compute_harmony(job: JobMetadata, job_dir: Path) -> dict:
             s, _ = librosa.load(str(job_dir / job.stems[name]), sr=harmony.SR, mono=True)
             if name == "bass":
                 bass_y = s
-            y = s if y is None else y[: len(s)] + s[: len(y)]
+            y = _add_signals(y, s)
         source = "stems: " + " + ".join(stems)
     else:
         y, _ = librosa.load(str(job_dir / job.input_path), sr=harmony.SR, mono=True)
@@ -128,6 +144,7 @@ def load_harmony(job_dir: Path) -> dict | None:
 # ---------- lyrics ----------
 
 LYRICS_FILE = "lyrics.json"
+LYRICS_DRAFT_FILE = "lyrics_draft.json"   # text chosen / typed but not aligned yet
 PROMPT_CHARS = 600  # Whisper reads at most ~224 tokens of prompt
 
 
@@ -162,6 +179,7 @@ def align_project_lyrics(
         raise PartError(str(exc), status=422) from exc
     if not lines:
         raise PartError("Nenhuma linha cantada encontrada.", status=422)
+    lyrics.refine_line_starts(lines, lyrics.voice_activity(audio, lyrics.WHISPER_SR))
     n_words = sum(len(l["words"]) for l in lines)
     data = {
         "version": 1,
@@ -173,6 +191,7 @@ def align_project_lyrics(
         "source": source,
         "created_at": now_iso(),
         "lines": lines,
+        "onsets_refined": True,
         "stats": {
             "lines": len(lines),
             "words": n_words,
@@ -181,13 +200,126 @@ def align_project_lyrics(
         },
     }
     (job_dir / LYRICS_FILE).write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    (job_dir / LYRICS_DRAFT_FILE).unlink(missing_ok=True)  # the aligned text supersedes the draft
     return data
+
+
+def retag_project_lyrics(job_dir: Path, text: str) -> dict:
+    """New section tags for the aligned lyrics, without running Whisper again."""
+    path = job_dir / LYRICS_FILE
+    if not path.exists():
+        raise PartError("Alinhe a letra primeiro.", status=422)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        data["lines"] = lyrics.retag_lines(text, data["lines"])
+    except lyrics.LyricsError as exc:
+        raise PartError(str(exc), status=422) from exc
+    data["text"] = text
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    (job_dir / LYRICS_DRAFT_FILE).unlink(missing_ok=True)
+    return data
+
+
+def save_lyrics_draft(job_dir: Path, text: str, language: str | None, source: str | None) -> dict | None:
+    path = job_dir / LYRICS_DRAFT_FILE
+    if not text.strip():
+        path.unlink(missing_ok=True)
+        return None
+    draft = {"text": text, "language": language, "source": source, "updated_at": now_iso()}
+    path.write_text(json.dumps(draft, ensure_ascii=False), encoding="utf-8")
+    return draft
+
+
+def load_lyrics_draft(job_dir: Path) -> dict | None:
+    path = job_dir / LYRICS_DRAFT_FILE
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+
+
+_ACTIVITY_CACHE: dict[str, tuple[float, instrumental.SongActivity]] = {}
+
+
+def song_activity(job: JobMetadata, job_dir: Path) -> instrumental.SongActivity | None:
+    """Note activity of the full-song MIDI (lead / pitched / drums per bin), cached by file mtime."""
+    full_midi = job_dir / job.artifacts.get("multitrack_midi", "full_song.mid")
+    if not job.multitrack or not full_midi.exists():
+        return None
+    key, mtime = str(full_midi), full_midi.stat().st_mtime
+    hit = _ACTIVITY_CACHE.get(key)
+    if hit and hit[0] == mtime:
+        return hit[1]
+    import pretty_midi
+
+    roles = {t.index: t for t in job.multitrack}
+    pm = pretty_midi.PrettyMIDI(str(full_midi))
+    tracks = []
+    for idx, inst in enumerate(pm.instruments):
+        info = roles.get(idx)
+        if info is not None and not info.is_drum and info.program in VOICE_PROGRAMS:
+            continue  # the sung melody is not instrumental activity
+        tracks.append({
+            "role": info.role if info else None,
+            "is_drum": inst.is_drum,
+            "onsets": [n.start for n in inst.notes],
+            "spans": [(n.start, n.end) for n in inst.notes],
+        })
+    act = instrumental.build_activity(tracks, job.duration or pm.get_end_time())
+    _ACTIVITY_CACHE[key] = (mtime, act)
+    return act
+
+
+def stems_mix(job: JobMetadata, job_dir: Path, names: list[str]) -> Path:
+    """Stereo sum of the chosen stems (for the player), cached as mix_<a>+<b>.wav."""
+    names = sorted(set(names))
+    unknown = [n for n in names if n not in job.stems]
+    if not names or unknown:
+        raise PartError(f"Stem inexistente: {', '.join(unknown) or '(nenhum)'}.", status=422)
+    if len(names) == 1:
+        return job_dir / job.stems[names[0]]
+    out = job_dir / f"mix_{'+'.join(names)}.wav"
+    sources = [job_dir / job.stems[n] for n in names]
+    if out.exists() and out.stat().st_mtime >= max(p.stat().st_mtime for p in sources):
+        return out
+    mixed, sr = None, None
+    for path in sources:
+        data, rate = sf.read(str(path), dtype="float32", always_2d=True)
+        if sr is None:
+            sr = rate
+        elif rate != sr:  # Demucs writes every stem at the same rate; resample just in case
+            data = librosa.resample(data.T, orig_sr=rate, target_sr=sr).T
+        if mixed is None:
+            mixed = data.copy()
+            continue
+        if data.shape[1] != mixed.shape[1]:  # mono + stereo: widen the mono one
+            data = np.repeat(data[:, :1], mixed.shape[1], axis=1) if data.shape[1] == 1 else data
+            if mixed.shape[1] == 1:
+                mixed = np.repeat(mixed, data.shape[1], axis=1)
+        n = max(len(mixed), len(data))
+        if len(mixed) < n:
+            mixed = np.pad(mixed, ((0, n - len(mixed)), (0, 0)))
+        mixed[: len(data)] += data
+    peak = float(np.max(np.abs(mixed))) if mixed.size else 0.0
+    if peak > 0.98:
+        mixed *= 0.95 / peak
+    tmp = out.with_suffix(".tmp.wav")
+    sf.write(str(tmp), mixed, sr, subtype="PCM_16")
+    tmp.replace(out)
+    return out
 
 
 def lyrics_payload(job: JobMetadata, job_dir: Path) -> dict:
     """Saved lyrics plus the chord sheet built from the current harmony analysis (when there is one)."""
     path = job_dir / LYRICS_FILE
     data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+    if data and data.get("mode") == "aligned" and lyrics.repair_lines(data["lines"]):
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")  # aligned before the outlier fix
+    if data and not data.get("onsets_refined"):
+        try:
+            audio, _ = _vocals_audio(job, job_dir)
+            lyrics.refine_line_starts(data["lines"], lyrics.voice_activity(audio, lyrics.WHISPER_SR))
+        except Exception:  # no audio to read: keep Whisper's times
+            pass
+        data["onsets_refined"] = True
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     harm = load_harmony(job_dir)
     sheet = None
     sections: list[dict] = []
@@ -196,26 +328,49 @@ def lyrics_payload(job: JobMetadata, job_dir: Path) -> dict:
         field = harm["field"] if harm else []
         duration = job.duration or data["lines"][-1]["end"]
         sheet = lyrics.chord_sheet(data["lines"], chords, field, duration)
-        sections = lyrics.infer_sections(data.get("text", ""), data["lines"], chords, duration)
-    return {"lyrics": data, "sheet": sheet, "sections": sections, "has_harmony": harm is not None}
+        act = song_activity(job, job_dir)
+        classify = (lambda start, end: instrumental.classify(start, end, act, chords)) if act else None
+        sections = lyrics.infer_sections(data.get("text", ""), data["lines"], chords, duration, classify=classify)
+    return {"lyrics": data, "sheet": sheet, "sections": sections, "has_harmony": harm is not None,
+            "draft": load_lyrics_draft(job_dir)}
 
 
 SAME_PART_S = 1.0
 
 
-def parts_from_lyrics(job: JobMetadata, job_dir: Path) -> list[Part]:
-    """One part per section inferred from the lyrics; sections already saved as parts are skipped."""
+def parts_from_lyrics(
+    job: JobMetadata, job_dir: Path, only_intro: bool = False, updated: list[Part] | None = None
+) -> list[Part]:
+    """One part per section inferred from the lyrics. Returns the parts created.
+
+    A part with the section's name but other bounds (the lyrics were re-aligned or repaired) gets
+    the new bounds, unless its tab was already generated (then it is left alone); those parts are
+    appended to ``updated``. Sections already saved as parts are skipped.
+    only_intro: just the instrumental intro (from the start to the first sung stanza), if any."""
     sections = lyrics_payload(job, job_dir)["sections"]
     if not sections:
         raise PartError("Alinhe a letra primeiro: as partes saem das seções da letra.", status=422)
+    if only_intro:
+        sections = [s for s in sections[:1] if s["kind"] == "instrumental" and s["start"] == 0]
     created = []
     for s in sections:
-        dup = any(
-            p.name == s["name"] and abs(p.start - s["start"]) < SAME_PART_S and abs(p.end - s["end"]) < SAME_PART_S
-            for p in job.parts
-        )
-        if not dup:
-            created.append(new_part(job, s["name"][:60], s["start"], s["end"]))
+        try:
+            start, end = check_range(job, s["start"], s["end"])
+        except PartError:
+            continue
+        name = s["name"][:60]
+        same_name = [p for p in job.parts if p.name == name]
+        if any(abs(p.start - start) < SAME_PART_S and abs(p.end - end) < SAME_PART_S for p in same_name):
+            continue
+        stale = next((p for p in same_name if not p.artifacts), None)
+        if stale is not None:
+            stale.start, stale.end = start, end
+            stale.stats = {}
+            if updated is not None:
+                updated.append(stale)
+        elif not same_name:
+            created.append(new_part(job, name, start, end))
+    job.parts.sort(key=lambda p: (p.start, p.created_at))
     return created
 
 
@@ -286,6 +441,80 @@ def new_part(job: JobMetadata, name: str, start: float, end: float) -> Part:
     return part
 
 
+FIT_MIN_S = 0.3  # a neighbour trimmed shorter than this is removed
+
+
+def insert_part_fitted(job: JobMetadata, job_dir: Path, name: str, start: float, end: float) -> tuple[Part, list[str]]:
+    """A new part that takes its place in the timeline: the parts it overlaps are trimmed (the one
+    before ends where it starts, the one after starts where it ends), a part containing it is split
+    in two, and parts it covers completely are removed. Changed parts lose their generated tab.
+    Returns the new part and a description of every change."""
+    start, end = check_range(job, start, end)
+    changes: list[str] = []
+    for p in list(job.parts):
+        if p.end <= start + 1e-3 or p.start >= end - 1e-3:
+            continue  # no overlap
+        old = (p.start, p.end)
+        if p.start < start and p.end > end:  # contains the new part: split
+            tail_start, tail_end = end, p.end
+            p.end = start
+            clear_outputs(job_dir, p)
+            twin = new_part(job, p.name, tail_start, tail_end)
+            changes.append(f"{p.name} dividida: {fmt_clock(old[0])}–{fmt_clock(start)} e {fmt_clock(twin.start)}–{fmt_clock(twin.end)}")
+            continue
+        if p.start < start:
+            p.end = start
+        elif p.end > end:
+            p.start = end
+        else:
+            p.start = p.end  # covered completely
+        if p.end - p.start < FIT_MIN_S:
+            clear_outputs(job_dir, p)
+            job.parts.remove(p)
+            changes.append(f"{p.name} removida (ficou dentro da parte nova)")
+        elif (p.start, p.end) != old:
+            clear_outputs(job_dir, p)
+            changes.append(f"{p.name}: {fmt_clock(old[0])}–{fmt_clock(old[1])} → {fmt_clock(p.start)}–{fmt_clock(p.end)}")
+    part = new_part(job, name, start, end)
+    return part, changes
+
+
+def fit_lyrics_to_parts(job: JobMetadata, job_dir: Path) -> list[str]:
+    """After the parts changed: each stanza of the synced lyrics whose part (same name, e.g.
+    "Verso 2") no longer holds all of it is pulled inside the part's bounds, so its lines show in
+    the part and not in the new one next to it. Returns a description of every change."""
+    if not (job_dir / LYRICS_FILE).exists() or not job.parts:
+        return []
+    payload = lyrics_payload(job, job_dir)
+    data, sections = payload["lyrics"], payload["sections"]
+    if not data:
+        return []
+    lines = data["lines"]
+    changes: list[str] = []
+    for part in job.parts:
+        best, best_overlap = None, 0.0
+        for s in sections:
+            if s["kind"] != "sung" or s["name"] != part.name or "lines" not in s:
+                continue
+            first, last = s["lines"]
+            overlap = min(part.end, lines[last - 1]["end"]) - max(part.start, lines[first]["start"])
+            if overlap > best_overlap:
+                best, best_overlap = s, overlap
+        if best is None:
+            continue
+        moved = lyrics.fit_lines_to_range(lines, *best["lines"], part.start, part.end)
+        if moved:
+            changes.append(f"letra de {part.name}: {moved} linha(s) movida(s) para dentro da parte")
+    if changes:
+        (job_dir / LYRICS_FILE).write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    return changes
+
+
+def fmt_clock(t: float) -> str:
+    m, s = divmod(max(0.0, t), 60)
+    return f"{int(m)}:{s:04.1f}"
+
+
 def clear_outputs(job_dir: Path, part: Part) -> None:
     shutil.rmtree(part_dir(job_dir, part.part_id), ignore_errors=True)
     part.artifacts = {}
@@ -347,11 +576,17 @@ def _excerpt_audio(
     mixed = None
     for p in paths:
         y, _ = librosa.load(str(p), sr=sr, mono=True, offset=t0, duration=dur)
-        mixed = y if mixed is None else mixed[: len(y)] + y[: len(mixed)]
+        mixed = _add_signals(mixed, y)
     if mixed is None or mixed.size == 0:
         return None, t0
+    peak = float(np.max(np.abs(mixed)))
+    if peak > 0.98:
+        mixed = mixed * (0.95 / peak)
     if params.bandpass_enabled:
         mixed = apply_bandpass_filter(mixed, sr, lowcut_hz=params.lowcut_hz, highcut_hz=params.highcut_hz)
+        peak = float(np.max(np.abs(mixed)))
+        if peak > 0.98:
+            mixed = mixed * (0.95 / peak)
     return mixed, t0
 
 
@@ -449,7 +684,7 @@ def _excerpt_chroma_profile(job: JobMetadata, job_dir: Path, part: Part, stem: s
     y = None
     for p in paths:
         s, _ = librosa.load(str(p), sr=SCALE_CHROMA_SR, mono=True, offset=part.start, duration=part.end - part.start)
-        y = s if y is None else y[: len(s)] + s[: len(y)]
+        y = _add_signals(y, s)
     if y is None or y.size < SCALE_CHROMA_SR // 4:
         return np.zeros(12), source
     if not names:

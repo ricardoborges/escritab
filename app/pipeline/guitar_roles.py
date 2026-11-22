@@ -137,15 +137,20 @@ def _first_per_event(on: np.ndarray, ev: np.ndarray, n_ev: int) -> np.ndarray:
     return first
 
 
-def chord_ratio(notes: np.ndarray) -> float:
+def chord_ratio(notes: np.ndarray, ignore_octaves: bool = False) -> float:
     """Share of notes that start together with another note (0 = monophonic line)."""
     if len(notes) < 2:
         return 0.0
-    on = np.sort(notes[:, 0])
+    order = np.argsort(notes[:, 0])
+    on = notes[order, 0]
+    pitches = notes[order, 2].astype(np.int64)
     close = np.zeros(len(on), bool)
-    d = np.diff(on) < EVENT_S
-    close[1:] |= d
-    close[:-1] |= d
+    for i in range(len(on) - 1):
+        j = i + 1
+        while j < len(on) and on[j] - on[i] < EVENT_S:
+            if not (ignore_octaves and (pitches[j] - pitches[i]) % 12 == 0):
+                close[i] = close[j] = True
+            j += 1
     return float(close.mean())
 
 
@@ -154,4 +159,4 @@ def is_lead_candidate(program: int, is_drum: bool, notes: np.ndarray) -> bool:
     if is_drum or program in _NOT_LEAD or 24 <= program <= 31 or len(notes) < 20:
         return False
     med = float(np.median(notes[:, 2]))
-    return chord_ratio(notes) <= 0.45 and 55 <= med <= 84
+    return chord_ratio(notes, ignore_octaves=True) <= 0.45 and 55 <= med <= 84

@@ -41,33 +41,6 @@
             <label for="projectNameInput">Nome da música:</label>
             <input type="text" id="projectNameInput" maxlength="80" placeholder="Usa o nome do arquivo se ficar vazio" />
           </div>
-          <fieldset class="choice-group">
-            <legend>Como analisar a música</legend>
-            <label class="choice">
-              <input type="radio" name="analysis" value="dettato" checked />
-              <span><strong>Música inteira (Dettato)</strong> <span class="mode-tag">Recomendado</span><br />
-                <small>Uma faixa MIDI por instrumento. Você escolhe as faixas de guitarra de cada parte.</small></span>
-            </label>
-            <label class="choice">
-              <input type="radio" name="analysis" value="classic" />
-              <span><strong>Isolar instrumentos antes (Demucs)</strong><br />
-                <small>Separa as stems e transcreve a pista escolhida. Útil quando o Dettato confunde os instrumentos.</small></span>
-            </label>
-          </fieldset>
-          <div class="classic-only hidden controls-stack">
-            <label class="checkbox-row">
-              <input type="checkbox" id="isolatedStemCheck" />
-              <span>Este arquivo já é uma pista de guitarra isolada (pular Demucs)</span>
-            </label>
-            <div class="row-inline">
-              <label for="demucsModelSelect">Modelo Demucs:</label>
-              <select id="demucsModelSelect">
-                <option value="roformer_htdemucs_6s">BS-RoFormer + htdemucs_6s (voz mais limpa p/ letra, ~6x mais lento)</option>
-                <option value="htdemucs_6s" selected>htdemucs_6s (6 stems, isola guitarra)</option>
-                <option value="htdemucs">htdemucs (4 stems)</option>
-              </select>
-            </div>
-          </div>
           <div class="panel-actions">
             <button type="submit" class="btn-primary" id="createProjectBtn">Criar projeto &rarr;</button>
           </div>
@@ -93,6 +66,19 @@
       </div>
       <div id="projectStatus" class="status-banner hidden"></div>
 
+      <!-- shown instead of the player while the song is being processed -->
+      <div id="pipelineCard" class="card pipeline hidden" aria-live="polite">
+        <div class="pipeline-head">
+          <h3>Preparando a música</h3>
+          <span class="muted small" id="pipelineElapsed"></span>
+        </div>
+        <ol id="pipelineSteps" class="pipeline-steps"></ol>
+        <div id="pipelineChoice" class="pipeline-choice hidden"></div>
+        <div id="pipelineStatus" class="status-banner hidden"></div>
+        <div class="pipeline-bar" aria-hidden="true"><span id="pipelineBarFill"></span></div>
+        <p id="pipelineNote" class="muted small"></p>
+      </div>
+
       <div id="playerSentinel" class="player-sentinel" aria-hidden="true"></div>
       <div class="card player-card" id="playerCard">
         <div class="daw-transport" role="toolbar" aria-label="Transporte">
@@ -117,17 +103,31 @@
             <input type="range" id="projRate" class="tp-slider" min="40" max="100" step="5" value="100" />
             <strong id="projRateVal" class="rate-val tp-value">100%</strong>
           </label>
-          <label class="tp-field tp-source">
+          <div class="tp-field tp-source src-picker" id="projSourcePicker">
             <span class="tp-label">Áudio</span>
-            <select id="projSource" class="tp-select"></select>
-          </label>
+            <button type="button" class="tp-select src-btn" id="projSourceBtn" aria-haspopup="true" aria-expanded="false" title="Escolher o que tocar: a música original ou um ou mais stems juntos">Mix original</button>
+            <div class="src-menu hidden" id="projSourceMenu" role="group" aria-label="O que tocar"></div>
+          </div>
           <label class="tp-toggle tp-icon-only" title="Encaixar na batida: as bordas do trecho grudam na batida mais próxima" aria-label="Encaixar na batida">
             <input type="checkbox" id="snapCheck" checked />
             <span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h4v8a3 3 0 0 0 6 0V4h4v8a7 7 0 0 1-14 0V4z" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"/><path d="M5 8h4M15 8h4" stroke="currentColor" stroke-width="2.2"/></svg></span>
           </label>
         </div>
+        <div id="selectionBar" class="selection-bar">
+          <span id="selDot" class="sel-dot"></span>
+          <span id="selLabel" class="sel-label"></span>
+          <label id="loopToggle" class="loop-toggle" title="Toca o trecho selecionado em loop, sem parar">
+            <input type="checkbox" id="loopCheck" /><span>&#10227; Repetir trecho</span>
+          </label>
+          <button type="button" class="btn-outline btn-small" id="newPartBtn" title="Criar uma parte nova a partir do cursor (ou do trecho selecionado). Também dá para arrastar sobre a onda">+ Nova parte</button>
+          <button type="button" class="btn-outline btn-small hidden" id="partEditBtn" title="Ajustar o começo e o fim desta parte (também dá para arrastar as bordas na onda)">&#9998; Ajustar</button>
+          <button type="button" class="btn-outline btn-small hidden" id="selClearBtn" title="Tirar a seleção e voltar a tocar a música inteira">&#10005; Limpar seleção</button>
+        </div>
         <canvas id="projRuler" class="time-ruler" title="Régua de tempo: clique para ir ao ponto · roda do mouse dá zoom"></canvas>
-        <div id="projWave" class="wave" title="Arraste sobre a onda para marcar um trecho novo. Um clique numa parte a seleciona, dois cliques a abrem."></div>
+        <div class="wave-stack">
+          <div id="projWave" class="wave" title="Arraste sobre a onda para marcar um trecho novo. Um clique numa parte a seleciona, dois cliques a abrem."></div>
+          <div id="lyricOverlay" class="lyric-overlay hidden" aria-hidden="true"><div id="lyricOverlayInner" class="lyric-overlay-inner"></div></div>
+        </div>
         <div id="partLane" class="part-lane hidden" aria-label="Partes da música">
           <div id="partLaneInner" class="part-lane-inner"></div>
         </div>
@@ -155,6 +155,7 @@
               <button type="button" class="nav-btn" id="navInBtn" title="Mais zoom (tecla +)">+</button>
               <button type="button" class="nav-btn" id="navSelBtn" title="Zoom no trecho selecionado (tecla Z)">&#8596; Trecho</button>
               <button type="button" class="nav-btn" id="navFitBtn" title="Mostrar a música inteira (tecla 0)">&#10530; Tudo</button>
+              <button type="button" class="nav-btn nav-toggle is-on hidden" id="navLyricsBtn" aria-pressed="true" title="Mostrar a letra sincronizada sobre a onda">&#9835; Letra</button>
               <button type="button" class="nav-btn nav-toggle is-on" id="navFollowBtn" aria-pressed="true" title="A tela acompanha o cursor enquanto toca">&#9654;&#65038; Seguir</button>
             </div>
           </div>
@@ -162,6 +163,88 @@
       </div>
 
       <div class="card player-extra">
+        <div id="draftPanel" class="draft-panel hidden">
+          <div class="row-inline">
+            <label for="draftName"><strong>Nova parte:</strong></label>
+            <input type="text" id="draftName" maxlength="60" placeholder="ex.: Solo" />
+          </div>
+          <div class="row-inline draft-times">
+            <label class="draft-time" title="Início do trecho (m:ss.s ou segundos). Setas ↑/↓ ajustam 0,1 s (Shift: 1 s)">
+              <span>Início</span>
+              <input type="text" id="draftStart" inputmode="decimal" autocomplete="off" spellcheck="false" />
+            </label>
+            <label class="draft-time" title="Fim do trecho (m:ss.s ou segundos). Setas ↑/↓ ajustam 0,1 s (Shift: 1 s)">
+              <span>Fim</span>
+              <input type="text" id="draftEnd" inputmode="decimal" autocomplete="off" spellcheck="false" />
+            </label>
+            <span class="muted" id="draftRange"></span>
+          </div>
+          <div class="row-inline" id="nameChips">
+            <button type="button" class="chip">Intro</button>
+            <button type="button" class="chip">Verso</button>
+            <button type="button" class="chip">Pré-refrão</button>
+            <button type="button" class="chip">Refrão</button>
+            <button type="button" class="chip">Riff</button>
+            <button type="button" class="chip">Solo</button>
+            <button type="button" class="chip">Breakdown</button>
+            <button type="button" class="chip">Ponte</button>
+            <button type="button" class="chip">Interlúdio</button>
+            <button type="button" class="chip">Instrumental</button>
+            <button type="button" class="chip">Outro</button>
+          </div>
+          <div id="draftFitBox" class="draft-fit hidden">
+            <label class="checkbox-row">
+              <input type="checkbox" id="draftFit" checked />
+              <span><strong>Encaixar na linha do tempo</strong>: ajustar as partes vizinhas para não sobrepor</span>
+            </label>
+            <ul id="draftFitList" class="draft-fit-list"></ul>
+          </div>
+          <div class="row-inline">
+            <button type="button" class="btn-outline" id="draftPlayBtn">&#10227; Ouvir em loop</button>
+            <button type="button" class="btn-primary" id="draftSaveBtn">Salvar parte</button>
+            <button type="button" class="btn-outline" id="draftCancelBtn">Descartar</button>
+          </div>
+        </div>
+
+        <div id="partEditPanel" class="draft-panel part-edit-panel hidden">
+          <div class="row-inline">
+            <strong>Ajustando as partes &middot; <span id="peName"></span></strong>
+            <span class="muted small">Arraste qualquer borda na onda: a parte do lado acompanha. Clique numa parte para ajustar os tempos dela abaixo (setas &uarr;/&darr;: 0,1 s, Shift: 1 s).</span>
+          </div>
+          <div class="row-inline">
+            <label class="pe-time pe-name" for="peNameInput">
+              <span>Nome</span>
+              <input type="text" id="peNameInput" maxlength="60" autocomplete="off" placeholder="ex.: Solo" />
+            </label>
+          </div>
+          <div class="row-inline draft-times">
+            <div class="pe-time">
+              <span>Início</span>
+              <button type="button" class="nav-btn" data-pe="start" data-step="-0.1" title="0,1 s antes (Shift: 1 s)">&minus;</button>
+              <input type="text" id="peStart" inputmode="decimal" autocomplete="off" spellcheck="false" aria-label="Início da parte" />
+              <button type="button" class="nav-btn" data-pe="start" data-step="0.1" title="0,1 s depois (Shift: 1 s)">+</button>
+              <button type="button" class="btn-outline btn-small" data-pe-here="start" title="O início vai para onde está o cursor">&#8676; Cursor</button>
+            </div>
+            <div class="pe-time">
+              <span>Fim</span>
+              <button type="button" class="nav-btn" data-pe="end" data-step="-0.1" title="0,1 s antes (Shift: 1 s)">&minus;</button>
+              <input type="text" id="peEnd" inputmode="decimal" autocomplete="off" spellcheck="false" aria-label="Fim da parte" />
+              <button type="button" class="nav-btn" data-pe="end" data-step="0.1" title="0,1 s depois (Shift: 1 s)">+</button>
+              <button type="button" class="btn-outline btn-small" data-pe-here="end" title="O fim vai para onde está o cursor">Cursor &#8677;</button>
+            </div>
+            <span class="muted" id="peRange"></span>
+          </div>
+          <label class="checkbox-row hidden" id="peNeighborsRow">
+            <input type="checkbox" id="peNeighbors" checked />
+            <span id="peNeighborsLabel">Mover a parte vizinha junto</span>
+          </label>
+          <p class="muted small hidden" id="peWarn"></p>
+          <div class="row-inline">
+            <button type="button" class="btn-outline" id="pePlayBtn">&#10227; Ouvir em loop</button>
+            <button type="button" class="btn-primary" id="peSaveBtn">Salvar</button>
+            <button type="button" class="btn-outline" id="peCancelBtn">Cancelar</button>
+          </div>
+        </div>
         <div id="liveChord" class="live-chord hidden" aria-live="polite">
           <div class="live-cell live-key">
             <span class="eyebrow">Tom</span>
@@ -187,47 +270,6 @@
           <span class="muted">Para ver os acordes ao vivo enquanto a música toca, analise a harmonia.</span>
           <button type="button" class="btn-outline btn-small" id="liveAnalyzeBtn">Analisar harmonia</button>
         </div>
-        <div id="selectionBar" class="selection-bar">
-          <span id="selDot" class="sel-dot"></span>
-          <span id="selLabel" class="sel-label"></span>
-          <label id="loopToggle" class="loop-toggle" title="Toca o trecho selecionado em loop, sem parar">
-            <input type="checkbox" id="loopCheck" /><span>&#10227; Repetir trecho</span>
-          </label>
-          <button type="button" class="btn-outline btn-small hidden" id="selClearBtn" title="Tirar a seleção e voltar a tocar a música inteira">&#10005; Limpar seleção</button>
-        </div>
-
-        <div id="draftPanel" class="draft-panel hidden">
-          <div class="row-inline">
-            <label for="draftName"><strong>Nova parte:</strong></label>
-            <input type="text" id="draftName" maxlength="60" placeholder="ex.: Solo" />
-          </div>
-          <div class="row-inline draft-times">
-            <label class="draft-time" title="Início do trecho (m:ss.s ou segundos). Setas ↑/↓ ajustam 0,1 s (Shift: 1 s)">
-              <span>Início</span>
-              <input type="text" id="draftStart" inputmode="decimal" autocomplete="off" spellcheck="false" />
-            </label>
-            <label class="draft-time" title="Fim do trecho (m:ss.s ou segundos). Setas ↑/↓ ajustam 0,1 s (Shift: 1 s)">
-              <span>Fim</span>
-              <input type="text" id="draftEnd" inputmode="decimal" autocomplete="off" spellcheck="false" />
-            </label>
-            <span class="muted" id="draftRange"></span>
-          </div>
-          <div class="row-inline" id="nameChips">
-            <button type="button" class="chip">Intro</button>
-            <button type="button" class="chip">Verso</button>
-            <button type="button" class="chip">Pré-refrão</button>
-            <button type="button" class="chip">Refrão</button>
-            <button type="button" class="chip">Riff</button>
-            <button type="button" class="chip">Solo</button>
-            <button type="button" class="chip">Ponte</button>
-            <button type="button" class="chip">Outro</button>
-          </div>
-          <div class="row-inline">
-            <button type="button" class="btn-outline" id="draftPlayBtn">&#10227; Ouvir em loop</button>
-            <button type="button" class="btn-primary" id="draftSaveBtn">Salvar parte</button>
-            <button type="button" class="btn-outline" id="draftCancelBtn">Descartar</button>
-          </div>
-        </div>
       </div>
 
       <div class="tabs" role="tablist" aria-label="Seções do projeto" id="projTabs">
@@ -245,6 +287,17 @@
         <div id="lyricsStatus" class="status-banner hidden"></div>
 
         <div id="lyricsEditor" class="lyrics-editor">
+          <form id="geniusForm" class="genius-search" role="search">
+            <input type="search" id="geniusQuery" placeholder="Música e artista" aria-label="Pesquisar letra no Genius" autocomplete="off" />
+            <button type="submit" class="btn-outline" id="geniusBtn">&#128269; Pesquisar letra</button>
+          </form>
+          <div id="geniusStatus" class="status-banner hidden"></div>
+          <ul id="geniusResults" class="genius-results hidden" aria-label="Resultados do Genius"></ul>
+          <div class="lyrics-tools">
+            <button type="button" class="btn-outline btn-small" id="tagOpenBtn" title="Dizer qual parte da música é cada estrofe (verso, refrão, ponte...)">&#127991; Marcar partes da letra</button>
+            <span class="muted small" id="tagSummary"></span>
+            <span class="muted small lyrics-saved" id="lyricsSaved" aria-live="polite"></span>
+          </div>
           <textarea id="lyricsText" rows="12" spellcheck="false" placeholder="[Verse 1]&#10;Primeira linha da letra&#10;Segunda linha&#10;&#10;[Chorus]&#10;Linhas do refrão..."></textarea>
           <div class="row-inline">
             <label class="inline-ctrl">Idioma
@@ -279,6 +332,7 @@
             <span class="mp-time small" id="sheetTime">0:00</span>
             <span class="lyrics-spacer"></span>
             <button type="button" class="btn-outline btn-small" id="sheetOptsBtn" aria-expanded="false" aria-controls="sheetOpts" title="Velocidade, filtro por parte, graus, acompanhar">&#9881; Opções <span class="chev" aria-hidden="true">&#9662;</span></button>
+            <button type="button" class="btn-outline btn-small" id="sheetPdfBtn" title="Cifra em preto e branco, acordes em negrito (escolha &quot;Salvar como PDF&quot; na janela de impressão). Segue o filtro de parte e a opção de graus.">&#128196; Exportar PDF</button>
             <button type="button" class="btn-outline btn-small" id="lyricsEditBtn" title="Mudar a letra, o idioma ou o modelo e alinhar de novo">&#9998; Editar letra</button>
           </div>
           <div id="sheetOpts" class="sheet-opts hidden">
@@ -456,15 +510,48 @@
         <button type="button" class="btn-outline btn-small" id="partDeleteBtn">Excluir parte</button>
       </div>
 
-      <div class="card">
-        <div class="card-head">
-          <h3>Praticar com o áudio original</h3>
-          <span class="muted">A velocidade muda sem alterar o tom.</span>
+      <div id="partPlayerSentinel" class="player-sentinel" aria-hidden="true"></div>
+      <div class="card player-card" id="partPlayerCard">
+        <div class="daw-transport" role="toolbar" aria-label="Transporte do trecho">
+          <div class="tp-buttons">
+            <button type="button" class="tp-btn" id="partFromStartBtn" aria-label="Do começo do trecho" title="Tocar do começo do trecho (tecla Home)">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="5" width="2.6" height="14" rx="1"/><path d="M19 5.8v12.4a1 1 0 0 1-1.55.83L9.2 13.2a1.4 1.4 0 0 1 0-2.4l8.25-5.83A1 1 0 0 1 19 5.8z"/></svg>
+            </button>
+            <button type="button" class="tp-btn tp-play" id="partPlayBtn" aria-label="Play" title="Play / Pause (barra de espaço)">
+              <svg class="ico-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.6v12.8a1 1 0 0 0 1.52.85l10.2-6.4a1 1 0 0 0 0-1.7L9.52 4.75A1 1 0 0 0 8 5.6z"/></svg>
+              <svg class="ico-pause" viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="5" width="4" height="14" rx="1.2"/><rect x="13.5" y="5" width="4" height="14" rx="1.2"/></svg>
+            </button>
+            <button type="button" class="tp-btn" id="partStopBtn" aria-label="Parar" title="Parar aqui (Play continua deste ponto). Clique de novo para voltar ao início do trecho">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+            </button>
+          </div>
+          <div class="tp-lcd" title="Posição dentro do trecho · trecho na música · andamento">
+            <div class="lcd-main"><span id="partTime" class="lcd-time">0:00.0</span><span class="lcd-total">/ <span id="partTimeTotal">0:00.0</span></span></div>
+            <div class="lcd-sub"><span><em>Trecho</em> <b id="partLcdRange">–</b></span><span><em>BPM</em> <b id="partBpmLcd">–</b></span></div>
+          </div>
+          <label class="tp-field tp-rate" title="Mais devagar sem mudar o tom">
+            <span class="tp-label">Velocidade</span>
+            <input type="range" id="partRate" class="tp-slider" min="40" max="100" step="5" value="100" />
+            <strong id="partRateVal" class="tp-value">100%</strong>
+          </label>
+          <label class="tp-field tp-source">
+            <span class="tp-label">Áudio</span>
+            <select id="partSource" class="tp-select"></select>
+          </label>
+          <div class="tp-group-right">
+            <label id="partLoopToggle" class="tp-toggle" title="Toca o trecho em loop. Desligado, a música segue depois do fim do trecho">
+              <input type="checkbox" id="partLoopCheck" checked />
+              <span><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2l3 3-3 3"/><path d="M4 11V9a4 4 0 0 1 4-4h12"/><path d="M7 22l-3-3 3-3"/><path d="M20 13v2a4 4 0 0 1-4 4H4"/></svg>Repetir trecho</span>
+            </label>
+          </div>
         </div>
         <div id="partWave" class="wave"></div>
         <div id="partChordLane" class="chord-lane hidden" aria-label="Acordes detectados">
           <div id="partChordLaneInner" class="chord-lane-inner"></div>
         </div>
+      </div>
+
+      <div class="card player-extra">
         <div id="partLiveChord" class="live-chord hidden" aria-live="polite">
           <div class="live-cell live-key">
             <span class="eyebrow">Tom</span>
@@ -487,22 +574,6 @@
           </div>
         </div>
         <p id="partHarmonyHint" class="live-hint muted small hidden">Para ver os acordes ao vivo, analise a harmonia na página da música (card "Harmonia").</p>
-        <div class="wave-transport">
-          <button type="button" class="btn-primary" id="partPlayBtn" title="Play / Pause (barra de espaço)">&#10227; Tocar trecho</button>
-          <button type="button" class="btn-outline" id="partFromStartBtn" title="Tocar do começo do trecho (tecla Home)">&#9198; Do começo</button>
-          <button type="button" class="btn-outline" id="partStopBtn" aria-label="Parar" title="Parar aqui (Play continua deste ponto). Clique de novo para voltar ao início do trecho">&#9632;</button>
-          <span class="mp-time" id="partTime">0:00</span>
-          <label class="inline-ctrl">Velocidade
-            <input type="range" id="partRate" min="40" max="100" step="5" value="100" />
-            <strong id="partRateVal">100%</strong>
-          </label>
-          <label class="inline-ctrl">Áudio
-            <select id="partSource"></select>
-          </label>
-          <label id="partLoopToggle" class="loop-toggle active" title="Toca o trecho em loop. Desligado, a música segue depois do fim do trecho">
-            <input type="checkbox" id="partLoopCheck" checked /><span>&#10227; Repetir trecho</span>
-          </label>
-        </div>
         <details class="advanced">
           <summary>Ajustar os limites do trecho</summary>
           <div class="row-inline top-gap">
@@ -514,50 +585,73 @@
         </details>
       </div>
 
-      <details class="card scale-card" id="scaleCard">
-        <summary class="card-head">
-          <h3>Escalas para tirar o solo de ouvido</h3>
-          <span class="muted">As escalas mais prováveis para as notas deste trecho, da mais provável para a menos.</span>
-        </summary>
-        <p id="scaleStatus" class="status-banner hidden"></p>
-        <div id="scaleBody" class="scale-body hidden">
-          <div class="scale-list" id="scaleList" role="radiogroup" aria-label="Escalas sugeridas"></div>
-          <div class="scale-detail">
-            <div class="scale-detail-head">
-              <strong id="scaleName" class="scale-name"></strong>
-              <button type="button" class="btn-outline btn-small" id="scalePlayBtn" title="Toca a escala subindo e descendo">&#9835; Ouvir a escala</button>
-            </div>
-            <p id="scaleDesc" class="muted small"></p>
-            <div id="scaleNotes" class="scale-notes" aria-label="Notas da escala"></div>
-            <p id="scaleExtra" class="muted small"></p>
-            <div class="fretboard-wrap"><svg id="scaleFretboard" class="fretboard" role="img" aria-label="Notas da escala no braço da guitarra"></svg></div>
-            <div class="scale-legend small muted">
-              <span><i class="dot dot-root"></i>tônica da escala</span>
-              <span><i class="dot dot-scale"></i>nota da escala</span>
-              <span><i class="dot dot-chord"></i>nota do acorde que está tocando</span>
-            </div>
-            <label class="checkbox-row small top-gap">
-              <input type="checkbox" id="scaleUseCheck" checked />
-              <span>Usar esta escala na transcrição do solo (motor monofônico): notas com altura ambígua vão para a nota da escala</span>
-            </label>
-          </div>
-        </div>
-        <p id="scaleSources" class="muted small"></p>
-      </details>
-
-      <div class="card hidden" id="partLyricsCard">
-        <div class="card-head">
-          <h3>Cifra do trecho</h3>
-          <span class="muted">A letra deste trecho com os acordes. Para carregar ou corrigir a letra, use a página da música.</span>
-        </div>
-        <div class="lyrics-toolbar">
-          <label class="checkbox-row inline-ctrl small"><input type="checkbox" id="partSheetNumerals" /><span>Graus no lugar dos acordes</span></label>
-          <label class="checkbox-row inline-ctrl small"><input type="checkbox" id="partSheetFollow" checked /><span>Acompanhar</span></label>
-        </div>
-        <p id="partSheetHint" class="muted small hidden"></p>
-        <div id="partSheet" class="sheet part-sheet"></div>
+      <div class="tabs" role="tablist" aria-label="Seções da parte" id="partTabs">
+        <button type="button" role="tab" class="tab" data-ptab="tab" id="ptab-tab">Tablatura <span class="tab-dot hidden" id="ptabTabDot" title="Ainda não gerada"></span></button>
+        <button type="button" role="tab" class="tab" data-ptab="transcribe" id="ptab-transcribe">Transcrição</button>
+        <button type="button" role="tab" class="tab" data-ptab="scales" id="ptab-scales">Escalas</button>
+        <button type="button" role="tab" class="tab" data-ptab="sheet" id="ptab-sheet">Cifra</button>
       </div>
 
+      <div class="part-panel" data-part-panel="tab" role="tabpanel" aria-labelledby="ptab-tab">
+        <div class="card tab-empty hidden" id="tabEmpty">
+          <p class="muted">Este trecho ainda não tem tablatura.</p>
+          <button type="button" class="btn-accent" id="tabEmptyBtn">Configurar e gerar a tablatura</button>
+        </div>
+      <div class="card player-section hidden" id="playerSection">
+        <div class="card-head">
+          <h3>Tablatura</h3>
+          <div id="exportLinks" class="export-group">
+            <a id="dlGp5" class="btn-outline btn-small" download>.GP5</a>
+            <a id="dlXml" class="btn-outline btn-small" download>.MusicXML</a>
+            <a id="dlMid" class="btn-outline btn-small" download>.MID</a>
+            <a id="dlTxt" class="btn-outline btn-small" download>.TXT</a>
+          </div>
+        </div>
+        <div class="daw-transport tab-transport" role="toolbar" aria-label="Transporte da tablatura">
+          <div class="tp-buttons">
+            <button type="button" class="tp-btn tp-play" id="playPauseBtn" aria-label="Play" title="Play / Pause">
+              <svg class="ico-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.6v12.8a1 1 0 0 0 1.52.85l10.2-6.4a1 1 0 0 0 0-1.7L9.52 4.75A1 1 0 0 0 8 5.6z"/></svg>
+              <svg class="ico-pause" viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="5" width="4" height="14" rx="1.2"/><rect x="13.5" y="5" width="4" height="14" rx="1.2"/></svg>
+            </button>
+            <button type="button" class="tp-btn" id="stopBtn" aria-label="Parar" title="Parar e voltar ao início">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+            </button>
+          </div>
+          <div class="tp-lcd" title="Posição na tablatura · compasso.tempo · andamento">
+            <div class="lcd-main"><span id="tabTime" class="lcd-time">0:00.0</span><span class="lcd-total">/ <span id="tabTimeTotal">0:00.0</span></span></div>
+            <div class="lcd-sub"><span><em>Comp</em> <b id="tabBarBeat">–</b></span><span><em>BPM</em> <b id="tabBpmLcd">–</b></span></div>
+          </div>
+          <label class="tp-field tp-rate" title="Velocidade de reprodução da tablatura">
+            <span class="tp-label">Velocidade</span>
+            <input type="range" id="tabRate" class="tp-slider" min="25" max="125" step="5" value="100" />
+            <strong id="tabRateVal" class="tp-value">100%</strong>
+          </label>
+          <div class="tp-group-right">
+            <label class="tp-toggle" title="Repetir a tablatura (loop)">
+              <input type="checkbox" id="tabLoopCheck" checked />
+              <span><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2l3 3-3 3"/><path d="M4 11V9a4 4 0 0 1 4-4h12"/><path d="M7 22l-3-3 3-3"/><path d="M20 13v2a4 4 0 0 1-4 4H4"/></svg>Loop</span>
+            </label>
+            <label class="tp-toggle" title="Metrônomo">
+              <input type="checkbox" id="metronomeCheck" />
+              <span><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3h6l4 18H5L9 3z"/><path d="M12 15l5-9"/><path d="M7.5 15h9"/></svg>Metrônomo</span>
+            </label>
+            <button type="button" class="tp-btn tp-btn-square" data-open-settings aria-label="Som" title="Trocar o som (SoundFont)">
+              <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/></svg>
+            </button>
+          </div>
+        </div>
+        <div id="tabStatus" class="status-banner hidden"></div>
+        <div id="alphaTabViewport" class="alphatab-viewport">
+          <div id="alphaTabContainer"></div>
+        </div>
+        <details class="ascii-drawer">
+          <summary>Tablatura em texto (ASCII)</summary>
+          <pre id="asciiPreviewBox"></pre>
+        </details>
+      </div>
+      </div>
+
+      <div class="part-panel" data-part-panel="transcribe" role="tabpanel" aria-labelledby="ptab-transcribe">
       <div class="card controls-stack">
         <div class="card-head"><h3>Transcrição do trecho</h3></div>
         <div class="row-inline" id="sourcePicker">
@@ -677,43 +771,54 @@
         </div>
         <div id="partStatus" class="status-banner hidden"></div>
       </div>
+      </div>
 
-      <div class="card player-section hidden" id="playerSection">
-        <div class="card-head">
-          <h3>Tablatura</h3>
-          <div id="exportLinks" class="export-group">
-            <a id="dlGp5" class="btn-outline btn-small" download>.GP5</a>
-            <a id="dlXml" class="btn-outline btn-small" download>.MusicXML</a>
-            <a id="dlMid" class="btn-outline btn-small" download>.MID</a>
-            <a id="dlTxt" class="btn-outline btn-small" download>.TXT</a>
-          </div>
-        </div>
-        <div class="player-toolbar">
-          <div class="player-controls">
-            <button type="button" id="playPauseBtn" class="btn-primary">&#9654; Play / Pause</button>
-            <button type="button" id="stopBtn" class="btn-outline">&#9632; Stop</button>
-            <label class="checkbox-row inline-ctrl"><input type="checkbox" id="loopCheck" checked /><span>Loop</span></label>
-            <label class="checkbox-row inline-ctrl"><input type="checkbox" id="metronomeCheck" /><span>Metrônomo</span></label>
-            <label class="inline-ctrl">Velocidade:
-              <select id="speedSelect">
-                <option value="0.25">0.25x</option>
-                <option value="0.5">0.50x</option>
-                <option value="0.75">0.75x</option>
-                <option value="1" selected>1.00x</option>
-                <option value="1.25">1.25x</option>
-              </select>
+      <div class="part-panel" data-part-panel="scales" role="tabpanel" aria-labelledby="ptab-scales">
+      <details class="card scale-card" id="scaleCard">
+        <summary class="card-head">
+          <h3>Escalas para tirar o solo de ouvido</h3>
+          <span class="muted">As escalas mais prováveis para as notas deste trecho, da mais provável para a menos.</span>
+        </summary>
+        <p id="scaleStatus" class="status-banner hidden"></p>
+        <div id="scaleBody" class="scale-body hidden">
+          <div class="scale-list" id="scaleList" role="radiogroup" aria-label="Escalas sugeridas"></div>
+          <div class="scale-detail">
+            <div class="scale-detail-head">
+              <strong id="scaleName" class="scale-name"></strong>
+              <button type="button" class="btn-outline btn-small" id="scalePlayBtn" title="Toca a escala subindo e descendo">&#9835; Ouvir a escala</button>
+            </div>
+            <p id="scaleDesc" class="muted small"></p>
+            <div id="scaleNotes" class="scale-notes" aria-label="Notas da escala"></div>
+            <p id="scaleExtra" class="muted small"></p>
+            <div class="fretboard-wrap"><svg id="scaleFretboard" class="fretboard" role="img" aria-label="Notas da escala no braço da guitarra"></svg></div>
+            <div class="scale-legend small muted">
+              <span><i class="dot dot-root"></i>tônica da escala</span>
+              <span><i class="dot dot-scale"></i>nota da escala</span>
+              <span><i class="dot dot-chord"></i>nota do acorde que está tocando</span>
+            </div>
+            <label class="checkbox-row small top-gap">
+              <input type="checkbox" id="scaleUseCheck" checked />
+              <span>Usar esta escala na transcrição do solo (motor monofônico): notas com altura ambígua vão para a nota da escala</span>
             </label>
-            <button type="button" class="btn-outline btn-small" data-open-settings>&#9881; Som</button>
           </div>
         </div>
-        <div id="tabStatus" class="status-banner hidden"></div>
-        <div id="alphaTabViewport" class="alphatab-viewport">
-          <div id="alphaTabContainer"></div>
+        <p id="scaleSources" class="muted small"></p>
+      </details>
+      </div>
+
+      <div class="part-panel" data-part-panel="sheet" role="tabpanel" aria-labelledby="ptab-sheet">
+      <div class="card hidden" id="partLyricsCard">
+        <div class="card-head">
+          <h3>Cifra do trecho</h3>
+          <span class="muted">A letra deste trecho com os acordes. Para carregar ou corrigir a letra, use a página da música.</span>
         </div>
-        <details class="ascii-drawer">
-          <summary>Tablatura em texto (ASCII)</summary>
-          <pre id="asciiPreviewBox"></pre>
-        </details>
+        <div class="lyrics-toolbar">
+          <label class="checkbox-row inline-ctrl small"><input type="checkbox" id="partSheetNumerals" /><span>Graus no lugar dos acordes</span></label>
+          <label class="checkbox-row inline-ctrl small"><input type="checkbox" id="partSheetFollow" checked /><span>Acompanhar</span></label>
+        </div>
+        <p id="partSheetHint" class="muted small hidden"></p>
+        <div id="partSheet" class="sheet part-sheet"></div>
+      </div>
       </div>
     </section>
   </main>
@@ -764,6 +869,26 @@
         <button type="submit" class="btn-primary">Concluir</button>
       </div>
     </form>
+  </dialog>
+
+  <dialog id="tagDialog" class="settings-dialog tag-dialog" aria-labelledby="tagTitle">
+    <div class="tag-body">
+      <div class="settings-head">
+        <div>
+          <h2 id="tagTitle">Marcar partes da letra</h2>
+          <p class="muted small">Clique numa estrofe e escolha qual parte da música ela é. Depois de escolher, a próxima estrofe é selecionada.</p>
+        </div>
+        <button type="button" class="btn-outline btn-small" id="tagCloseBtn" aria-label="Fechar sem salvar">&#10005;</button>
+      </div>
+      <div class="tag-palette" id="tagPalette" role="group" aria-label="Partes da música"></div>
+      <ol class="tag-stanzas" id="tagStanzas"></ol>
+      <div class="settings-foot">
+        <span class="muted" id="tagCount"></span>
+        <button type="button" class="btn-outline btn-small" id="tagClearBtn">Limpar todas</button>
+        <button type="button" class="btn-outline" id="tagCancelBtn">Cancelar</button>
+        <button type="button" class="btn-primary" id="tagSaveBtn">Aplicar na letra</button>
+      </div>
+    </div>
   </dialog>
 
   <script src="/static/midi_player.js"></script>

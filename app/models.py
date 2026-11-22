@@ -174,6 +174,7 @@ class PartCreate(BaseModel):
     name: str = Field(min_length=1, max_length=60)
     start: float = Field(ge=0.0)
     end: float = Field(gt=0.0)
+    fit: bool = False  # trim / split the parts it overlaps so the timeline has no overlaps
 
 
 class PartUpdate(BaseModel):
@@ -185,6 +186,18 @@ class PartUpdate(BaseModel):
 class PartGenerate(BaseModel):
     transcription: TranscriptionParams
     tab: TabParams
+
+
+class LyricsDraft(BaseModel):
+    """Lyrics text kept in the project before (or between) alignments; empty text deletes it."""
+    text: str = Field(default="", max_length=30000)
+    language: Optional[str] = Field(default=None, max_length=8)
+    source: Optional[str] = Field(default=None, max_length=300)  # e.g. "Genius: Title · Artist"
+
+
+class LyricsTags(BaseModel):
+    """The aligned lyrics' text with new [Section] tags (the words must stay the same)."""
+    text: str = Field(min_length=1, max_length=30000)
 
 
 class LyricsRequest(BaseModel):
