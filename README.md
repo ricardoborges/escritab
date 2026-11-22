@@ -1,104 +1,116 @@
 # EscriTab
 
-Transforma áudio (MP3/WAV/FLAC, inclusive músicas geradas no Suno) em **MIDI multi-instrumento** e
-**tablatura de guitarra**, com um estúdio web local para ouvir, recortar e exportar as partes.
+EscriTab is a web app (FastAPI + JS) for learning songs section by section. You mark the parts of a
+song (intro, riff, solo…) on a DAW-style player and practice them in a loop, slowed down without
+changing the pitch. For each part, the app transcribes the notes (Dettato, Basic Pitch, or CREPE for
+single-note solos, on stems separated with Demucs) and generates a playable tablature. It also shows
+the lyrics with chords (Whisper), live harmony, and the most likely scales for figuring out a solo by
+ear.
 
-## Como funciona
+It turns audio (MP3/WAV/FLAC, including songs generated with Suno) into **multi-instrument MIDI** and
+**guitar tablature**, with a local web studio to listen to, cut, and export the parts.
 
-1. **Upload** da música: cria um projeto.
-2. **Separação de stems** (opcional) com [Demucs](https://github.com/facebookresearch/demucs).
-   Opcionalmente, o [BS-RoFormer](https://github.com/lucidrains/BS-RoFormer) tira a voz antes, e o
-   `htdemucs_6s` separa o instrumental. A stem de voz fica bem mais limpa, o que ajuda no
-   alinhamento da letra. O processo é cerca de 6× mais lento. Os pesos públicos do viperx
-   (`model_bs_roformer_ep_317_sdr_12.9755`, ~640 MB) são baixados no primeiro uso para
-   `workspace/models/roformer` (ou para a pasta em `ESCRITAB_MODELS`).
-3. **Transcrição para MIDI** com [Dettato](https://github.com/kobimusic/dettato), que gera uma faixa
-   por instrumento detectado, mais a bateria. O motor legado Basic Pitch continua disponível para
-   trechos curtos.
-   Para **solos e riffs de nota única**, use o motor *Solo / riff monofônico*. Ele rastreia uma
-   nota por vez com [CREPE](https://github.com/maxrmorrison/torchcrepe) na stem da guitarra
-   (`htdemucs_6s`) e segue estes passos:
-   - mede e compensa a afinação da gravação (bandas alguns cents fora de A440);
-   - corta as notas nas palhetadas e nos saltos de altura (hammer-on, pull-off, slide);
-   - mantém bend e vibrato como uma nota só, com o bend marcado na tablatura (`7b9`).
-4. **Separação de papéis da guitarra**: base (rítmica) e solo/riff.
-5. **Otimização no braço** (Viterbi) para escolher corda e casa de cada nota, em afinações de 6 e
-   7 cordas (Standard E, Drop D, Eb, D Standard, Drop C, Drop B, 7 cordas Standard e Drop A).
-6. **Exportação** em Guitar Pro (`.gp5`), MusicXML e tablatura ASCII, com ritmo quantizado em
-   fusas, pausas, ligaduras na barra de compasso e bends, mais player AlphaTab e player MIDI com
-   SoundFonts no navegador.
+## How it works
 
-A análise pesada roda uma única vez por projeto e fica em cache. Criar ou mover uma "parte" (um
-trecho da música) só recorta as notas já transcritas.
+1. **Upload** a song: this creates a project.
+2. **Stem separation** (optional) with [Demucs](https://github.com/facebookresearch/demucs).
+   Optionally, [BS-RoFormer](https://github.com/lucidrains/BS-RoFormer) removes the vocals first and
+   `htdemucs_6s` separates the instrumental. The vocal stem comes out much cleaner, which helps with
+   lyrics alignment. This is about 6× slower. The public viperx weights
+   (`model_bs_roformer_ep_317_sdr_12.9755`, ~640 MB) are downloaded on first use to
+   `workspace/models/roformer` (or to the folder set in `ESCRITAB_MODELS`).
+3. **MIDI transcription** with [Dettato](https://github.com/kobimusic/dettato), which produces one
+   track per detected instrument, plus drums. The legacy Basic Pitch engine is still available for
+   short excerpts.
+   For **single-note solos and riffs**, use the *monophonic solo / riff* engine. It tracks one note
+   at a time with [CREPE](https://github.com/maxrmorrison/torchcrepe) on the guitar stem
+   (`htdemucs_6s`) and:
+   - measures and compensates for the recording's tuning (bands a few cents off A440);
+   - splits notes at pick attacks and pitch jumps (hammer-on, pull-off, slide);
+   - keeps bends and vibrato as a single note, with the bend marked in the tab (`7b9`).
+4. **Guitar role separation**: rhythm and lead/riff.
+5. **Fretboard optimization** (Viterbi) to pick the string and fret for each note, in 6- and
+   7-string tunings (Standard E, Drop D, Eb, D Standard, Drop C, Drop B, 7-string Standard and
+   Drop A).
+6. **Export** to Guitar Pro (`.gp5`), MusicXML and ASCII tab, with rhythm quantized down to 32nd
+   notes, rests, ties across bar lines and bends, plus an AlphaTab player and a MIDI player with
+   SoundFonts in the browser.
 
-## Requisitos
+The heavy analysis runs once per project and is cached. Creating or moving a "part" (a section of the
+song) only slices the notes that were already transcribed.
 
-- **Python 3.11** (exatamente 3.11, por causa do TensorFlow usado pelo motor legado)
+## Requirements
+
+- **Python 3.11** (exactly 3.11, because of the TensorFlow used by the legacy engine)
 - [uv](https://docs.astral.sh/uv/)
-- **GPU NVIDIA** recomendada. No Windows e no Linux o PyTorch é instalado com CUDA 12.8 (RTX 30xx ou
-  mais nova). Também roda em CPU, só que mais devagar.
-- `git`, porque o Dettato é instalado direto do GitHub
+- **NVIDIA GPU** recommended. On Windows and Linux, PyTorch is installed with CUDA 12.8 (RTX 30xx or
+  newer). It also runs on CPU, just slower.
+- `git`, because Dettato is installed straight from GitHub
 
-## Instalação
+## Installation
 
 ```bash
 uv sync
 ```
 
-Para incluir o motor legado Basic Pitch (instala o TensorFlow 2.15, que roda só em CPU no Windows):
+To include the legacy Basic Pitch engine (installs TensorFlow 2.15, which runs on CPU only on
+Windows):
 
 ```bash
 uv sync --extra legacy
 ```
 
-Sem esse extra, o motor `basic_pitch` usa o pYIN do librosa como alternativa.
+Without that extra, the `basic_pitch` engine falls back to librosa's pYIN.
 
-Na primeira transcrição, os pesos do Dettato são baixados do Hugging Face.
+On the first transcription, the Dettato weights are downloaded from Hugging Face.
 
-## Executar
+## Running
 
 ```bash
 uv run python run.py
 ```
 
-Depois abra <http://127.0.0.1:8000>.
+Then open <http://127.0.0.1:8000>.
 
-Os projetos e arquivos gerados ficam em `workspace/`.
+Projects and generated files are stored in `workspace/`.
 
-### SoundFonts (opcional)
+### SoundFonts (optional)
 
-Os players do navegador usam arquivos `.sf2` / `.sf3`. Por padrão eles são lidos da pasta
-`./soundfonts`, que pode ser uma pasta comum ou um link/junction. Para usar outras pastas, defina
-`ESCRITAB_SOUNDFONTS` (separe várias pastas com `;` no Windows ou `:` no Linux/macOS):
+The browser players use `.sf2` / `.sf3` files. By default they are read from the `./soundfonts`
+folder, which can be a regular folder or a link/junction. To use other folders, set
+`ESCRITAB_SOUNDFONTS` (separate multiple folders with `;` on Windows or `:` on Linux/macOS):
 
 ```powershell
-$env:ESCRITAB_SOUNDFONTS = "D:\SoundFonts;E:\Mais SoundFonts"
+$env:ESCRITAB_SOUNDFONTS = "D:\SoundFonts;E:\More SoundFonts"
 uv run python run.py
 ```
 
-## Testes
+## Tests
 
 ```bash
 uv run pytest
 ```
 
-## Estrutura
+## Structure
 
 ```
 app/
-  main.py            API FastAPI e servidor do frontend
-  projects.py        projetos, partes e cache da análise
-  soundfonts.py      biblioteca local de SoundFonts
+  main.py            FastAPI API and frontend server
+  projects.py        projects, parts and analysis cache
+  soundfonts.py      local SoundFont library
   pipeline/
-    stem_separator.py      Demucs (e a cadeia RoFormer + Demucs)
-    roformer_separator.py  BS-RoFormer: voz x instrumental
-    dettato_transcriber.py transcrição multi-instrumento
-    midi_transcriber.py    Basic Pitch / pYIN (legado)
-    lead_transcriber.py    solo/riff monofônico (CREPE + onsets + bends)
-    guitar_roles.py        base x solo
-    fretboard.py           otimizador de digitação (Viterbi)
-    exporters.py           GP5, MusicXML, tab ASCII
-  static/            SPA (HTML/JS/CSS, AlphaTab, player MIDI)
-tests/               testes pytest
-run.py               ponto de entrada (uvicorn em 127.0.0.1:8000)
+    stem_separator.py      Demucs (and the RoFormer + Demucs chain)
+    roformer_separator.py  BS-RoFormer: vocals vs. instrumental
+    dettato_transcriber.py multi-instrument transcription
+    midi_transcriber.py    Basic Pitch / pYIN (legacy)
+    lead_transcriber.py    monophonic solo/riff (CREPE + onsets + bends)
+    guitar_roles.py        rhythm vs. lead
+    fretboard.py           fingering optimizer (Viterbi)
+    harmony.py             key, chords per beat, progressions
+    lyrics.py              lyrics aligned with Whisper, chord sheet
+    scales.py              likely scales for a solo (ear-training aid)
+    exporters.py           GP5, MusicXML, ASCII tab
+  static/            SPA (HTML/JS/CSS, AlphaTab, MIDI player)
+tests/               pytest tests
+run.py               entry point (uvicorn on 127.0.0.1:8000)
 ```
