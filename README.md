@@ -7,14 +7,26 @@ Transforma áudio (MP3/WAV/FLAC, inclusive músicas geradas no Suno) em **MIDI m
 
 1. **Upload** da música: cria um projeto.
 2. **Separação de stems** (opcional) com [Demucs](https://github.com/facebookresearch/demucs).
+   Opcionalmente, o [BS-RoFormer](https://github.com/lucidrains/BS-RoFormer) tira a voz antes, e o
+   `htdemucs_6s` separa o instrumental. A stem de voz fica bem mais limpa, o que ajuda no
+   alinhamento da letra. O processo é cerca de 6× mais lento. Os pesos públicos do viperx
+   (`model_bs_roformer_ep_317_sdr_12.9755`, ~640 MB) são baixados no primeiro uso para
+   `workspace/models/roformer` (ou para a pasta em `ESCRITAB_MODELS`).
 3. **Transcrição para MIDI** com [Dettato](https://github.com/kobimusic/dettato), que gera uma faixa
    por instrumento detectado, mais a bateria. O motor legado Basic Pitch continua disponível para
    trechos curtos.
+   Para **solos e riffs de nota única**, use o motor *Solo / riff monofônico*. Ele rastreia uma
+   nota por vez com [CREPE](https://github.com/maxrmorrison/torchcrepe) na stem da guitarra
+   (`htdemucs_6s`) e segue estes passos:
+   - mede e compensa a afinação da gravação (bandas alguns cents fora de A440);
+   - corta as notas nas palhetadas e nos saltos de altura (hammer-on, pull-off, slide);
+   - mantém bend e vibrato como uma nota só, com o bend marcado na tablatura (`7b9`).
 4. **Separação de papéis da guitarra**: base (rítmica) e solo/riff.
 5. **Otimização no braço** (Viterbi) para escolher corda e casa de cada nota, em afinações de 6 e
    7 cordas (Standard E, Drop D, Eb, D Standard, Drop C, Drop B, 7 cordas Standard e Drop A).
-6. **Exportação** em Guitar Pro (`.gp5`), MusicXML e tablatura ASCII, com player AlphaTab e player
-   MIDI com SoundFonts no navegador.
+6. **Exportação** em Guitar Pro (`.gp5`), MusicXML e tablatura ASCII, com ritmo quantizado em
+   fusas, pausas, ligaduras na barra de compasso e bends, mais player AlphaTab e player MIDI com
+   SoundFonts no navegador.
 
 A análise pesada roda uma única vez por projeto e fica em cache. Criar ou mover uma "parte" (um
 trecho da música) só recorta as notas já transcritas.
@@ -78,9 +90,11 @@ app/
   projects.py        projetos, partes e cache da análise
   soundfonts.py      biblioteca local de SoundFonts
   pipeline/
-    stem_separator.py      Demucs
+    stem_separator.py      Demucs (e a cadeia RoFormer + Demucs)
+    roformer_separator.py  BS-RoFormer: voz x instrumental
     dettato_transcriber.py transcrição multi-instrumento
     midi_transcriber.py    Basic Pitch / pYIN (legado)
+    lead_transcriber.py    solo/riff monofônico (CREPE + onsets + bends)
     guitar_roles.py        base x solo
     fretboard.py           otimizador de digitação (Viterbi)
     exporters.py           GP5, MusicXML, tab ASCII

@@ -170,3 +170,50 @@ def test_system_reports_compute_device(tmp_path: Path):
     assert "torch_version" in info
     if info["device"] == "cpu" and info["gpu_name"]:
         assert info["hint"]  # explains why the detected GPU isn't used
+
+
+def test_part_lead_engine_writes_monophonic_tab(tmp_path: Path):
+    client = TestClient(create_app(workspace_root=tmp_path))
+    pid = _create_project(client, _make_wav_bytes(duration_s=3.0))["job_id"]
+    part_id = client.post(f"/api/projects/{pid}/parts", json={"name": "Solo", "start": 0.0, "end": 3.0}).json()["part"]["part_id"]
+    res = client.post(
+        f"/api/projects/{pid}/parts/{part_id}/generate",
+        json={
+            "transcription": {
+                "engine": "lead", "source": "stem", "stem": "guitar", "monophonic": True,
+                "voicing_threshold": 0.4, "tuning": "standard_e", "bpm": 120.0,
+            },
+            "tab": {"tuning": "standard_e", "max_frets": 24, "fret_preference": "high", "bpm": 120.0},
+        },
+    )
+    assert res.status_code == 200, res.text
+    stats = res.json()["part"]["stats"]
+    assert stats["total_notes"] >= 1
+    assert stats["engine"].startswith("solo/riff monofônico")
+
+
+def test_part_scales_endpoint_and_lead_with_scale(tmp_path: Path):
+    client = TestClient(create_app(workspace_root=tmp_path))
+    pid = _create_project(client, _make_wav_bytes(freq_hz=440.0, duration_s=3.0))["job_id"]
+    part_id = client.post(f"/api/projects/{pid}/parts", json={"name": "Solo", "start": 0.0, "end": 3.0}).json()["part"]["part_id"]
+
+    res = client.get(f"/api/projects/{pid}/parts/{part_id}/scales")
+    assert res.status_code == 200, res.text
+    data = res.json()
+    assert data["scales"] and len(data["profile"]) == 12 and data["has_harmony"] is False
+    assert all(9 in {n["pc"] for n in s["notes"]} for s in data["scales"][:3])  # an A (440 Hz) is in them
+    assert client.get(f"/api/projects/{pid}/parts/nope/scales").status_code == 404
+
+    body = {
+        "transcription": {"engine": "lead", "source": "stem", "stem": "guitar", "scale": "9:minor_pentatonic",
+                          "tuning": "standard_e", "bpm": 120.0},
+        "tab": {"tuning": "standard_e", "max_frets": 24, "fret_preference": "high", "bpm": 120.0},
+    }
+    res = client.post(f"/api/projects/{pid}/parts/{part_id}/generate", json=body)
+    assert res.status_code == 200, res.text
+    part = res.json()["part"]
+    assert "escala A pentatônica menor" in part["stats"]["engine"]
+    assert part["transcription_params"]["scale"] == "9:minor_pentatonic"
+
+    body["transcription"]["scale"] = "9:bogus"
+    assert client.post(f"/api/projects/{pid}/parts/{part_id}/generate", json=body).status_code == 400

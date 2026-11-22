@@ -100,6 +100,36 @@ wheels = [
 ]
 
 [[package]]
+name = "beartype"
+version = "0.23.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/79/34/c0cfdaee9c796c8381439fed0fcab62810753b8b0adb1ec88fa7f41eaa5d/beartype-0.23.1.tar.gz", hash = "sha256:8b805f246b32931c74f2b321ea0939fe5bb2ff43c12a3eff19cc4c854b832e1d", size = 1993714, upload-time = "2026-10-11T05:36:55.251Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1c/cb/2f6aa982e2860c1156830db3da7f823b71784ed7d533ca289ea9b6c6347a/beartype-0.23.1-py3-none-any.whl", hash = "sha256:4461b4dc57e3fdd6c8a8464b22cf118002eea107c33e9fef651c69068ab3cce3", size = 1582101, upload-time = "2026-10-11T05:36:52.431Z" },
+]
+
+[[package]]
+name = "bs-roformer"
+version = "1.4.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "beartype" },
+    { name = "einops" },
+    { name = "einx" },
+    { name = "hyper-connections" },
+    { name = "librosa" },
+    { name = "pope-pytorch" },
+    { name = "rotary-embedding-torch" },
+    { name = "torch", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "torch", version = "2.15.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
+    { name = "torch-einops-utils" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/2c/da/b4d3f4ae604019a977cdfcc237aeb2608129868fda2f4ee007f3c26312c4/bs_roformer-1.4.1.tar.gz", hash = "sha256:c27ad80d039081e07c69c10f2d20d1d8733b156a56443600635fd996491eee38", size = 16647, upload-time = "2026-11-04T19:53:59.651Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2b/13/1f78e3784bb181af4fc1b3bd0ab9d9c53069e7ea11ae04c7714047ddb8ee/bs_roformer-1.4.1-py3-none-any.whl", hash = "sha256:b769aae738818b1dc3b8aa5f079f13ba5d9838c2f75634eeff5ab5957e433885", size = 24020, upload-time = "2026-11-04T19:53:58.417Z" },
+]
+
+[[package]]
 name = "cattrs"
 version = "26.2.1"
 source = { registry = "https://pypi.org/simple" }
@@ -444,10 +474,31 @@ wheels = [
 ]
 
 [[package]]
+name = "einx"
+version = "0.4.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "frozendict" },
+    { name = "numpy" },
+    { name = "sympy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/84/96/df2cfa7418b175dddcf30a88711d01b79a32c3ac4d64b379ed89a3de2c08/einx-0.4.3.tar.gz", hash = "sha256:be7d81ea1908b9f00e4a467840998fc483c33aa32aaaaa3ada6c8386f693edf9", size = 120087, upload-time = "2026-04-01T09:50:41.473Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d0/28/6768d342b2b888f9facdddbd430daf015cab936e2598281ab436b1be1b4a/einx-0.4.3-py3-none-any.whl", hash = "sha256:47ce54a0144f6dffcfacdd8fe2cc9e2e5e6485dda2471330ab75ee747dd22f39", size = 163766, upload-time = "2026-04-01T09:50:40.165Z" },
+]
+
+[package.optional-dependencies]
+torch = [
+    { name = "torch", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "torch", version = "2.15.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
+]
+
+[[package]]
 name = "escritab"
 version = "1.0.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "bs-roformer" },
     { name = "demucs", version = "4.0.1", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'" },
     { name = "demucs", version = "4.1.0", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine != 'x86_64' or sys_platform != 'darwin'" },
     { name = "dettato" },
@@ -464,6 +515,7 @@ dependencies = [
     { name = "soundfile" },
     { name = "torch", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
     { name = "torch", version = "2.15.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
+    { name = "torchcrepe" },
     { name = "uvicorn" },
 ]
 
@@ -481,6 +533,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "basic-pitch", marker = "extra == 'legacy'", specifier = ">=0.3.0" },
+    { name = "bs-roformer", specifier = ">=1.4.1" },
     { name = "demucs", specifier = ">=4.0.1" },
     { name = "dettato", git = "https://github.com/kobimusic/dettato?rev=9b724251794f2bbd5eaa43e54734e5a251829130" },
     { name = "fastapi", specifier = ">=0.115.0" },
@@ -496,6 +549,7 @@ requires-dist = [
     { name = "soundfile", specifier = ">=0.12.1" },
     { name = "torch", marker = "sys_platform != 'linux' and sys_platform != 'win32'", specifier = ">=2.6" },
     { name = "torch", marker = "sys_platform == 'linux' or sys_platform == 'win32'", specifier = ">=2.6", index = "https://download.pytorch.org/whl/cu128" },
+    { name = "torchcrepe", specifier = ">=0.0.24" },
     { name = "uvicorn", specifier = ">=0.30.0" },
 ]
 provides-extras = ["legacy"]
@@ -539,6 +593,15 @@ version = "25.12.19"
 source = { registry = "https://pypi.org/simple" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e8/2d/d2a548598be01649e2d46231d151a6c56d10b964d94043a335ae56ea2d92/flatbuffers-25.12.19-py2.py3-none-any.whl", hash = "sha256:7634f50c427838bb021c2d66a3d1168e9d199b0607e6329399f04846d42e20b4", size = 26661, upload-time = "2025-12-19T23:16:13.622Z" },
+]
+
+[[package]]
+name = "frozendict"
+version = "2.5.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/ed/45/7335e29396dde7c9ec00c4758c46bb7d4a9f07ca0a351ae58b814ca6b6a4/frozendict-2.5.1.tar.gz", hash = "sha256:b79b0c133220c5976ff05b8bfe3c1215119caa6255f477a309151fd5e2c2c0c3", size = 337443, upload-time = "2026-10-30T20:37:01.879Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/60/98/0902e074fb777b4064594a3a18773a50d661dbb8d73b7487fdf63ba088cc/frozendict-2.5.1-py3-none-any.whl", hash = "sha256:b6e602e286b912beca1e12615f50eda6c74646b440c8cfde34221adee6c98c5e", size = 18055, upload-time = "2026-10-30T20:37:00.614Z" },
 ]
 
 [[package]]
@@ -734,6 +797,21 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/b5/3b/2fcef1eabe52aec90fc8cd253cc154da1d02a446d7bbcdec59b4a51d4be7/huggingface_hub-2.4.0.tar.gz", hash = "sha256:13a6158b9e3393d9d3f248ce99074d50c2a0a1449fb9d8e2f710751e2084c188", size = 1066194, upload-time = "2026-10-29T15:30:12.321Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d4/55/ff47f1b082ecf5f43f4bc1e3b932d68eead171dabbbd1a92666c686301d7/huggingface_hub-2.4.0-py3-none-any.whl", hash = "sha256:42ecfd93ede47bdd333daebbf66a32d7bfe2e18752754fe4d2d4f98a0179d801", size = 857021, upload-time = "2026-10-29T15:30:10.421Z" },
+]
+
+[[package]]
+name = "hyper-connections"
+version = "0.4.11"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "einops" },
+    { name = "torch", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "torch", version = "2.15.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
+    { name = "torch-einops-utils" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/86/2e/47f00583d958527f006459e0e769aa3b20dc61b7b1916df1fa0b9820a192/hyper_connections-0.4.11.tar.gz", hash = "sha256:d4f852733cf8595b2b15e81597ec0ce931907f284a812272c03edea0a4ef12e3", size = 17864, upload-time = "2026-05-13T18:28:47.553Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/42/2d/23143d9e5af1b6a2e7ed4e5f88a6c0cbf7587563acb8f15a740b726ce07f/hyper_connections-0.4.11-py3-none-any.whl", hash = "sha256:92a8d24340ef6dbf2a356b1f2e74ebb877d680aa96afc6f9f1cff636ab2e55f0", size = 29558, upload-time = "2026-05-13T18:28:46.304Z" },
 ]
 
 [[package]]
@@ -1334,6 +1412,22 @@ wheels = [
 ]
 
 [[package]]
+name = "pope-pytorch"
+version = "0.2.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "einops" },
+    { name = "einx", extra = ["torch"] },
+    { name = "torch", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "torch", version = "2.15.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
+    { name = "torch-einops-utils" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/9d/30/2a8f6b7e94fee71cf135052d8ab5588d2fd67a8f744d16b4324f282c836c/pope_pytorch-0.2.1.tar.gz", hash = "sha256:5655aa25aa72523b49ed03f9c5ce26e0faa082017abfa641529445edbd26f823", size = 17256, upload-time = "2026-06-21T16:44:19.309Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/26/72/e61cf723799a3d02a6cda894f0f9f50069691d344413fd37168a3aaee3d0/pope_pytorch-0.2.1-py3-none-any.whl", hash = "sha256:b9dc493c190aa80d1ee9a4ff7343d9f9b5cbdfaace3bbf3c8b10b22d2c5c9e1f", size = 19461, upload-time = "2026-06-21T16:44:18.31Z" },
+]
+
+[[package]]
 name = "pretty-midi"
 version = "0.2.11.post0"
 source = { registry = "https://pypi.org/simple" }
@@ -1593,6 +1687,20 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/c8/5a/b17e1e257d3e6f2e7758930e1256832c9ddd576f8631781e6a072914befa/retrying-1.4.2.tar.gz", hash = "sha256:d102e75d53d8d30b88562d45361d6c6c934da06fab31bd81c0420acb97a8ba39", size = 11411, upload-time = "2025-08-03T03:35:25.189Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/67/f3/6cd296376653270ac1b423bb30bd70942d9916b6978c6f40472d6ac038e7/retrying-1.4.2-py3-none-any.whl", hash = "sha256:bbc004aeb542a74f3569aeddf42a2516efefcdaff90df0eb38fbfbf19f179f59", size = 10859, upload-time = "2025-08-03T03:35:23.829Z" },
+]
+
+[[package]]
+name = "rotary-embedding-torch"
+version = "0.9.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "einops" },
+    { name = "torch", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "torch", version = "2.15.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/42/45/a363e3848971bb77bfdbf02895f6d47e0db0b2eca19e3c256195c3511505/rotary_embedding_torch-0.9.2.tar.gz", hash = "sha256:5eb7c8e899af5fb3cfa24f9e5902663183ef77c9e3fa55f478d0de34d183431b", size = 13361, upload-time = "2026-11-07T14:09:09.22Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/99/30/db962f3755fc0accdd164e3320e2116bd8d4c52b60ead7d65db3f1bfd3e6/rotary_embedding_torch-0.9.2-py3-none-any.whl", hash = "sha256:c57891f82e6d73981d46b08ea22e2944d217bc3b463612e336498c9f32d69d16", size = 17530, upload-time = "2026-11-07T14:09:08.104Z" },
 ]
 
 [[package]]
@@ -1940,11 +2048,50 @@ wheels = [
 ]
 
 [[package]]
+name = "torch-einops-utils"
+version = "0.2.8"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "einops" },
+    { name = "torch", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "torch", version = "2.15.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a3/dd/edcf94375919410314f58d78b94ded0acadfeb3a14cf938f17852b366c18/torch_einops_utils-0.2.8.tar.gz", hash = "sha256:7ee3b1380aa297e28347163be3eb72b74c56080ad4c16d508b4fa69880eb84fc", size = 46940, upload-time = "2026-11-17T16:25:59.006Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ab/bc/f7d0705d3ffdf783610e6b3f61784daa8ba23503a6059c3b0c973dedce7f/torch_einops_utils-0.2.8-py3-none-any.whl", hash = "sha256:6cf6d34e60bbdfe0805f55e7948a8965313625da14e6cdefa15a1bbc9d461194", size = 30256, upload-time = "2026-11-17T16:25:57.887Z" },
+]
+
+[[package]]
 name = "torchaudio"
 version = "2.11.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "torch", version = "2.15.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "torch", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "torch", version = "2.15.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/95/2a/c2b0f44906f8a4e8d90facdf68bc76bb14e72a0cbb9cc0457ca1c2fcd101/torchaudio-2.11.1-py3-none-macosx_14_0_arm64.whl", hash = "sha256:917667ab3e357d286b0e2405a33dc538e4344d554b72e1b2b03382a4352ca857", size = 699189, upload-time = "2026-10-28T15:21:42.129Z" },
+    { url = "https://files.pythonhosted.org/packages/90/c7/e352c0a0f34653f3f6a581b580352ab1c83e5d04019826ade4dfc26cf664/torchaudio-2.11.1-py3-none-manylinux_2_28_aarch64.whl", hash = "sha256:ad1175202b5cdb7585a38c1330845430e128c4ed8ceb770639318aa40fc1994b", size = 1678033, upload-time = "2026-10-28T15:21:43.28Z" },
+    { url = "https://files.pythonhosted.org/packages/e6/ad/b0bf9bfa9db80acf0ce660e01a67b3b735343ab51ce1410b18d2aaed254c/torchaudio-2.11.1-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:0173b5b51e1368aa88de3cbe4e98508b5e9df4d8d59356c4e1fbc830c96191ef", size = 1816417, upload-time = "2026-10-28T15:21:45.007Z" },
+    { url = "https://files.pythonhosted.org/packages/6b/9e/549c9bb2d139fe78c90c9381f9ffbfc87232336df4537a65ea31d51fcdee/torchaudio-2.11.1-py3-none-win_amd64.whl", hash = "sha256:46ea71634d181f797370f046075ea982043c228b38d674fd7d9fc1c855a37b6a", size = 334360, upload-time = "2026-10-28T15:21:40.715Z" },
+]
+
+[[package]]
+name = "torchcrepe"
+version = "0.0.24"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "librosa" },
+    { name = "resampy" },
+    { name = "scipy" },
+    { name = "torch", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "torch", version = "2.15.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
+    { name = "torchaudio" },
+    { name = "tqdm" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c8/98/0da59205962218ed1be90034aa11db3e2e10a54293508ef0aa07a1e5ceb9/torchcrepe-0.0.24.tar.gz", hash = "sha256:7eebdd59bdfed822ac19820cb73823335e4eba88f1c76c411a7ab05f7ca6db0a", size = 72329307, upload-time = "2025-05-16T18:41:41.393Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9b/a9/799d00b9dc7a18bb0ff53fccc187b1d83c690e337d078345c17ec0a1a224/torchcrepe-0.0.24-py3-none-any.whl", hash = "sha256:ec054c23c9d45328f213f93a0131570a3f0e5903e9382792bed95f17a8c36d5a", size = 72326298, upload-time = "2025-05-16T18:41:13.419Z" },
 ]
 
 [[package]]

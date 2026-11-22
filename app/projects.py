@@ -19,11 +19,15 @@ import numpy as np
 import soundfile as sf
 
 from app.models import JobMetadata, NoteEvent, Part, TabParams, TranscriptionParams
-from app.pipeline import dettato_transcriber, harmony, lyrics
+from app.pipeline import dettato_transcriber, harmony, lead_transcriber, lyrics, scales
 from app.pipeline.audio_cleaner import apply_bandpass_filter, apply_noise_gate, mix_stem_files
 from app.pipeline.exporters import export_ascii_tab, export_gp5, export_musicxml
 from app.pipeline.fretboard import optimize_fretboard
-from app.pipeline.midi_transcriber import _run_basic_pitch_or_fallback, finalize_notes_to_midi
+from app.pipeline.midi_transcriber import (
+    _run_basic_pitch_or_fallback,
+    _tuning_pitch_bounds,
+    finalize_notes_to_midi,
+)
 
 PEAKS_FILE = "peaks.json"
 PEAKS_PER_SECOND = 50
@@ -186,11 +190,33 @@ def lyrics_payload(job: JobMetadata, job_dir: Path) -> dict:
     data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
     harm = load_harmony(job_dir)
     sheet = None
+    sections: list[dict] = []
     if data:
         chords = harm["chords"] if harm else []
         field = harm["field"] if harm else []
-        sheet = lyrics.chord_sheet(data["lines"], chords, field, job.duration or data["lines"][-1]["end"])
-    return {"lyrics": data, "sheet": sheet, "has_harmony": harm is not None}
+        duration = job.duration or data["lines"][-1]["end"]
+        sheet = lyrics.chord_sheet(data["lines"], chords, field, duration)
+        sections = lyrics.infer_sections(data.get("text", ""), data["lines"], chords, duration)
+    return {"lyrics": data, "sheet": sheet, "sections": sections, "has_harmony": harm is not None}
+
+
+SAME_PART_S = 1.0
+
+
+def parts_from_lyrics(job: JobMetadata, job_dir: Path) -> list[Part]:
+    """One part per section inferred from the lyrics; sections already saved as parts are skipped."""
+    sections = lyrics_payload(job, job_dir)["sections"]
+    if not sections:
+        raise PartError("Alinhe a letra primeiro: as partes saem das seções da letra.", status=422)
+    created = []
+    for s in sections:
+        dup = any(
+            p.name == s["name"] and abs(p.start - s["start"]) < SAME_PART_S and abs(p.end - s["end"]) < SAME_PART_S
+            for p in job.parts
+        )
+        if not dup:
+            created.append(new_part(job, s["name"][:60], s["start"], s["end"]))
+    return created
 
 
 def ensure_project(job: JobMetadata, job_dir: Path) -> bool:
@@ -274,12 +300,7 @@ def slice_notes(notes: list[NoteEvent], start: float, end: float) -> list[NoteEv
 
     A note attacked just before the start (a hand-placed edge is never exact) is pulled in at 0."""
     out = [
-        NoteEvent(
-            pitch=n.pitch,
-            start=max(0.0, n.start - start),
-            end=min(n.end, end) - start,
-            velocity=n.velocity,
-        )
+        n.model_copy(update={"start": max(0.0, n.start - start), "end": min(n.end, end) - start})
         for n in notes
         if start - ONSET_TOLERANCE_S <= n.start < end and min(n.end, end) - max(n.start, start) > 0.01
     ]
@@ -315,21 +336,62 @@ def _cached_stem_notes(job: JobMetadata, job_dir: Path, spec: str) -> list[NoteE
     return notes
 
 
-def _basic_pitch_excerpt(
-    job: JobMetadata, job_dir: Path, part: Part, params: TranscriptionParams
-) -> list[NoteEvent]:
-    """Basic Pitch on the excerpt (plus a margin) of the selected stem(s); absolute times."""
+def _excerpt_audio(
+    job: JobMetadata, job_dir: Path, part: Part, params: TranscriptionParams, sr: int
+) -> tuple[np.ndarray | None, float]:
+    """The excerpt (plus a margin) of the selected stem(s), mono at `sr`, band-passed when asked.
+    Returns (audio, t0) where t0 is the absolute time of the first sample."""
     paths = _stem_paths(job, job_dir, params.stem)
     t0 = max(0.0, part.start - BASIC_PITCH_MARGIN_S)
     dur = part.end + BASIC_PITCH_MARGIN_S - t0
-    mixed, sr = None, 22050
+    mixed = None
     for p in paths:
         y, _ = librosa.load(str(p), sr=sr, mono=True, offset=t0, duration=dur)
         mixed = y if mixed is None else mixed[: len(y)] + y[: len(mixed)]
     if mixed is None or mixed.size == 0:
-        return []
+        return None, t0
     if params.bandpass_enabled:
         mixed = apply_bandpass_filter(mixed, sr, lowcut_hz=params.lowcut_hz, highcut_hz=params.highcut_hz)
+    return mixed, t0
+
+
+def _lead_excerpt(
+    job: JobMetadata, job_dir: Path, part: Part, params: TranscriptionParams
+) -> tuple[list[NoteEvent], str]:
+    """Monophonic pitch tracking (CREPE) on the excerpt: solos and single-note riffs."""
+    audio, t0 = _excerpt_audio(job, job_dir, part, params, lead_transcriber.SR)
+    if audio is None:
+        return [], "lead"
+    lo, hi = _tuning_pitch_bounds(params.tuning, params.max_frets)
+    scale = scales.parse_scale_id(params.scale)
+    if params.scale and scale is None:
+        raise PartError(f"Escala inválida: {params.scale}")
+    notes, info = lead_transcriber.transcribe_lead(
+        audio,
+        lead_transcriber.SR,
+        fmin=float(librosa.midi_to_hz(lo - 1)),
+        fmax=float(librosa.midi_to_hz(hi + 1)),
+        min_note_s=params.minimum_note_length_ms / 1000.0,
+        voicing_threshold=params.voicing_threshold,
+        onset_threshold=params.onset_threshold,
+        scale_pcs=scales.scale_pcs(*scale) if scale else None,
+    )
+    shifted = [n.model_copy(update={"start": n.start + t0, "end": n.end + t0}) for n in notes]
+    cents = info["tuning_offset_cents"]
+    desc = f"solo/riff monofônico ({info['tracker']}, afinação {cents:+.0f} cents"
+    if scale:
+        desc += f", escala {scales.scale_label(*scale)}: {info['scale_corrected']} notas ajustadas"
+    return shifted, desc + ")"
+
+
+def _basic_pitch_excerpt(
+    job: JobMetadata, job_dir: Path, part: Part, params: TranscriptionParams
+) -> list[NoteEvent]:
+    """Basic Pitch on the excerpt (plus a margin) of the selected stem(s); absolute times."""
+    sr = 22050
+    mixed, t0 = _excerpt_audio(job, job_dir, part, params, sr)
+    if mixed is None:
+        return []
     mixed = apply_noise_gate(mixed, sr, threshold_db=params.noise_gate_db)
     peak = float(np.max(np.abs(mixed)))
     if peak > 0.98:
@@ -342,7 +404,7 @@ def _basic_pitch_excerpt(
         notes = _run_basic_pitch_or_fallback(clip, params)
     finally:
         clip.unlink(missing_ok=True)
-    return [NoteEvent(pitch=n.pitch, start=n.start + t0, end=n.end + t0, velocity=n.velocity) for n in notes]
+    return [n.model_copy(update={"start": n.start + t0, "end": n.end + t0}) for n in notes]
 
 
 def part_raw_notes(
@@ -359,6 +421,8 @@ def part_raw_notes(
         params.track_indices = indices
         return dettato_transcriber.notes_from_midi_tracks(full_midi, indices), "dettato (MIDI completo)"
 
+    if params.engine == "lead":
+        return _lead_excerpt(job, job_dir, part, params)
     if params.engine == "dettato" and dettato_transcriber.is_available():
         try:
             return _cached_stem_notes(job, job_dir, params.stem), f"dettato (stem {params.stem})"
@@ -368,6 +432,69 @@ def part_raw_notes(
             reason = f"dettato falhou: {exc}"[:160]
             return _basic_pitch_excerpt(job, job_dir, part, params), f"basic_pitch (fallback — {reason})"
     return _basic_pitch_excerpt(job, job_dir, part, params), "basic_pitch"
+
+
+# ---------- scales of a part (solo ear-training aid) ----------
+
+SCALE_CHROMA_SR = 22050
+
+
+def _excerpt_chroma_profile(job: JobMetadata, job_dir: Path, part: Part, stem: str | None) -> tuple[np.ndarray, str]:
+    """Energy-weighted pitch-class profile of the excerpt's audio (a stem when there is one)."""
+    names = [s for s in (stem or "").split("+") if s in job.stems]
+    if not names:
+        names = ["guitar"] if "guitar" in job.stems else []
+    paths = [job_dir / job.stems[n] for n in names] or [job_dir / job.input_path]
+    source = " + ".join(names) if names else "mix"
+    y = None
+    for p in paths:
+        s, _ = librosa.load(str(p), sr=SCALE_CHROMA_SR, mono=True, offset=part.start, duration=part.end - part.start)
+        y = s if y is None else y[: len(s)] + s[: len(y)]
+    if y is None or y.size < SCALE_CHROMA_SR // 4:
+        return np.zeros(12), source
+    if not names:
+        y = librosa.effects.harmonic(y, margin=2.0)
+    tuning = float(librosa.estimate_tuning(y=y, sr=SCALE_CHROMA_SR))
+    # from E3: the register of solos; the chugging of the rhythm guitar stays mostly below
+    chroma = librosa.feature.chroma_cqt(
+        y=y, sr=SCALE_CHROMA_SR, hop_length=512, tuning=tuning, bins_per_octave=36,
+        fmin=librosa.note_to_hz("E3"), n_octaves=4,
+    )
+    rms = librosa.feature.rms(y=y, hop_length=512)[0][: chroma.shape[1]]
+    prof = (chroma[:, : len(rms)] * rms).sum(axis=1)
+    prof = np.clip(prof - np.percentile(prof, 25), 0.0, None)  # chroma never drops to 0: remove its floor
+    return prof, source
+
+
+def part_scales(job: JobMetadata, job_dir: Path, part: Part, stem: str | None = None) -> dict:
+    """Scales the excerpt is probably built on, best first, with the evidence used."""
+    audio_prof, audio_source = _excerpt_chroma_profile(job, job_dir, part, stem)
+    sources = [f"áudio do trecho ({audio_source})"]
+    profile = audio_prof / (audio_prof.sum() or 1.0)
+    midi_path = part_dir(job_dir, part.part_id) / part.artifacts.get("midi", "")
+    if part.artifacts.get("midi") and midi_path.exists():
+        notes = dettato_transcriber.notes_from_midi_tracks(midi_path, [0])
+        note_prof = scales.note_profile(notes)
+        if note_prof.sum() > 0:
+            # the transcribed line is the solo itself; the audio still holds the backing guitars
+            profile = 0.65 * note_prof / note_prof.sum() + 0.35 * profile
+            sources.insert(0, f"notas transcritas da parte ({len(notes)})")
+    if profile.sum() <= 0:
+        raise PartError("Não há notas suficientes neste trecho para sugerir escalas.", status=422)
+
+    harm = load_harmony(job_dir)
+    key_tonic = key_family = None
+    roots = spans = None
+    if harm:
+        key_tonic, key_family = harm["key"]["tonic"], harm["key"]["family"]
+        roots, spans = scales.chord_root_weights(harm["chords"], part.start, part.end)
+        sources.append(f"tom ({harm['key']['name']}) e acordes do trecho")
+    return {
+        "scales": scales.suggest_scales(profile, key_tonic, key_family, roots, spans),
+        "profile": [round(float(v), 4) for v in profile / (profile.sum() or 1.0)],
+        "sources": sources,
+        "has_harmony": harm is not None,
+    }
 
 
 def generate_part(

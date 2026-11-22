@@ -115,6 +115,9 @@ const els = {
   onsetSlider: $("onsetSlider"),
   onsetVal: $("onsetVal"),
   frameSlider: $("frameSlider"),
+  voicingSlider: $("voicingSlider"),
+  voicingVal: $("voicingVal"),
+  monophonicCheck: $("monophonicCheck"),
   frameVal: $("frameVal"),
   gateSlider: $("gateSlider"),
   gateVal: $("gateVal"),
@@ -654,6 +657,13 @@ async function renderProjectView() {
   });
   loadHarmony();
   loadLyrics();
+  attachSelectionHint(w);
+  // resizing / moving the part being drawn: live start–end next to the pointer
+  w.regions.on("region-update", (region, side) => {
+    if (region !== w.draft) return;
+    const ev = selHint.lastEvent;
+    if (ev) showSelHint(ev.clientX, ev.clientY, snapTime(region.start), snapTime(region.end), side);
+  });
   w.regions.on("region-created", (region) => {
     if (region.id.startsWith("part-") || region.id === SEL_RANGE_ID) return;
     if (w.draft && w.draft !== region) w.draft.remove();
@@ -683,6 +693,73 @@ async function renderProjectView() {
   w.regions.on("region-double-clicked", (region) => {
     if (region.id.startsWith("part-")) navigate(`#/p/${p.job_id}/part/${region.id.slice(5)}`);
   });
+}
+
+// ---------- live start/end hint while dragging a selection on the waveform ----------
+
+const selHint = { el: null, lastEvent: null };
+
+function selHintEl() {
+  if (!selHint.el) {
+    // on <body>: position:fixed must not be trapped by a filtered / transformed ancestor
+    selHint.el = el("div", { class: "sel-hint hidden", "aria-hidden": "true" });
+    document.body.append(selHint.el);
+  }
+  return selHint.el;
+}
+
+/** Shows "start → end · length" above the waveform, following the pointer. side = the edge being moved. */
+function showSelHint(x, y, start, end, side) {
+  const hint = selHintEl();
+  const a = Math.min(start, end);
+  const b = Math.max(start, end);
+  hint.innerHTML = "";
+  hint.append(
+    el("span", { class: side === "start" ? "is-active" : "" }, fmtClock(a, 2)),
+    el("span", { class: "sel-hint-arrow" }, "→"),
+    el("span", { class: side === "end" ? "is-active" : "" }, fmtClock(b, 2)),
+    el("span", { class: "sel-hint-len" }, `${(b - a).toFixed(2)} s`),
+  );
+  hint.classList.remove("hidden");
+  const waveRect = els.projWave.getBoundingClientRect();
+  const w = hint.offsetWidth;
+  const left = Math.min(window.innerWidth - w - 8, Math.max(8, x - w / 2));
+  const top = Math.max(8, waveRect.top - hint.offsetHeight - 6);
+  hint.style.left = `${left}px`;
+  hint.style.top = `${top}px`;
+}
+
+function hideSelHint() {
+  if (selHint.el) selHint.el.classList.add("hidden");
+}
+
+/** A drag on the bare waveform draws a new part: the regions plugin emits nothing until the drop,
+ * so the times come from the pointer itself (same 3 px threshold as the plugin). */
+function attachSelectionHint(w) {
+  const { signal } = w.listeners;
+  const container = els.projWave;
+  let drag = null;
+  container.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    selHint.lastEvent = e;
+    // dragging the draft itself (move/resize) is reported by "region-update"
+    const onDraft = w.draft && w.draft.element && e.composedPath().includes(w.draft.element);
+    drag = onDraft ? null : { x: e.clientX, t0: clickTime(w, e), moved: false };
+  }, { capture: true, signal });
+  window.addEventListener("pointermove", (e) => {
+    selHint.lastEvent = e;
+    if (!drag) return;
+    if (!drag.moved && Math.abs(e.clientX - drag.x) < 3) return;
+    drag.moved = true;
+    const t = clickTime(w, e);
+    showSelHint(e.clientX, e.clientY, snapTime(Math.min(drag.t0, t)), snapTime(Math.max(drag.t0, t)), t >= drag.t0 ? "end" : "start");
+  }, { signal });
+  const end = () => {
+    drag = null;
+    hideSelHint();
+  };
+  window.addEventListener("pointerup", end, { signal });
+  window.addEventListener("pointercancel", end, { signal });
 }
 
 function drawPartRegions() {
@@ -1308,10 +1385,80 @@ function snapDraft() {
 }
 
 function showDraft() {
-  const r = projWave.draft;
-  els.draftRange.textContent = fmtRange(r.start, r.end);
+  renderDraftTimes();
   show(els.draftPanel);
   if (!els.draftName.value) els.draftName.focus();
+}
+
+const draftStartInput = $("draftStart");
+const draftEndInput = $("draftEnd");
+
+/** Start / end fields + length; a field being typed in is left alone. */
+function renderDraftTimes() {
+  const r = projWave && projWave.draft;
+  if (!r) return;
+  if (document.activeElement !== draftStartInput) draftStartInput.value = fmtClock(r.start, 2);
+  if (document.activeElement !== draftEndInput) draftEndInput.value = fmtClock(r.end, 2);
+  draftStartInput.classList.remove("invalid");
+  draftEndInput.classList.remove("invalid");
+  els.draftRange.textContent = `duração ${(r.end - r.start).toFixed(2)} s`;
+}
+
+/** "1:23.45", "83.45", "83,45" or "1:23" -> seconds; NaN if unreadable. */
+function parseClock(text) {
+  const s = String(text).trim().replace(",", ".");
+  if (!s) return NaN;
+  const m = s.match(/^(?:(\d+):)?(\d+(?:\.\d*)?|\.\d+)$/);
+  if (!m) return NaN;
+  return (m[1] ? Number(m[1]) * 60 : 0) + Number(m[2]);
+}
+
+/** Applies a typed start/end to the draft (exact: no beat snap). Returns false if invalid. */
+function applyDraftTime(which, value) {
+  const r = projWave && projWave.draft;
+  if (!r) return false;
+  const dur = projWave.ws.getDuration() || state.project.duration || 0;
+  if (!Number.isFinite(value)) return false;
+  let start = r.start;
+  let end = r.end;
+  if (which === "start") start = Math.max(0, Math.min(value, end - 0.1));
+  else end = Math.min(dur, Math.max(value, start + 0.1));
+  r.setOptions({ start, end });
+  if (sel.cur && sel.cur.kind === "draft") setSelection(draftSelection());
+  return true;
+}
+
+for (const [input, which] of [[draftStartInput, "start"], [draftEndInput, "end"]]) {
+  const commit = () => {
+    const ok = applyDraftTime(which, parseClock(input.value));
+    input.classList.toggle("invalid", !ok);
+    if (ok) {
+      input.value = fmtClock(projWave.draft[which], 2);
+      renderDraftTimes();
+    }
+  };
+  input.addEventListener("change", commit);
+  input.addEventListener("blur", () => {
+    if (!input.classList.contains("invalid")) renderDraftTimes();
+  });
+  input.addEventListener("keydown", (e) => {
+    const r = projWave && projWave.draft;
+    if (!r) return;
+    if (e.key === "Enter") {
+      e.preventDefault();
+      commit();
+    } else if (e.key === "Escape") {
+      input.blur();
+      renderDraftTimes();
+    } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+      e.preventDefault();
+      const step = (e.shiftKey ? 1 : 0.1) * (e.key === "ArrowUp" ? 1 : -1);
+      const cur = parseClock(input.value);
+      applyDraftTime(which, (Number.isFinite(cur) ? cur : r[which]) + step);
+      input.value = fmtClock(r[which], 2);
+      renderDraftTimes();
+    }
+  });
 }
 
 function discardDraft() {
@@ -1353,6 +1500,12 @@ els.draftSaveBtn.addEventListener("click", async () => {
   const r = projWave && projWave.draft;
   const name = els.draftName.value.trim();
   if (!r) return;
+  const badTime = [draftStartInput, draftEndInput].find((i) => i.classList.contains("invalid"));
+  if (badTime) {
+    badTime.focus();
+    banner(els.projectStatus, "Tempo inválido. Use m:ss.s (ex.: 1:23.5) ou segundos (ex.: 83.5).", "error");
+    return;
+  }
   if (!name) {
     els.draftName.focus();
     banner(els.projectStatus, "Dê um nome para a parte (ex.: Intro, Riff, Solo).", "error");
@@ -2137,10 +2290,65 @@ function renderLyrics() {
     : `${share}% das palavras reconhecidas na voz. `)
     + `${ly.stats.lines} linhas · Whisper ${ly.model} (${ly.device === "cuda" ? "GPU" : "CPU"}) · ${ly.source}.`;
   show(lEls.noHarmony, !d.has_harmony);
+  renderStructure();
   renderSheetFilter();
   renderSheet(SU.project);
   renderPartSheet();
 }
+
+const SECTION_SOURCE = {
+  tag: "da tag na letra",
+  repeat: "mesmo texto de outra seção",
+  gap: "pausa longa na voz",
+  guess: "bloco sem tag",
+};
+
+/** Song structure inferred from the lyrics (tags, repeated blocks, pauses): click = loop it. */
+function renderStructure() {
+  const box = $("songStructure");
+  const list = $("songStructureList");
+  const sections = (L.data && L.data.sections) || [];
+  show(box, sections.length > 0);
+  list.innerHTML = "";
+  if (!sections.length) return;
+  const tagged = sections.some((s) => s.source === "tag" && s.kind === "sung");
+  $("songStructureHint").textContent = (tagged
+    ? "pelas tags da letra"
+    : "inferida (sem tags: blocos repetidos viram refrão)")
+    + (L.data.has_harmony ? " · limites nas trocas de acorde" : "");
+  const saved = state.project.parts;
+  for (const s of sections) {
+    const exists = saved.some((p) => p.name === s.name && Math.abs(p.start - s.start) < 1 && Math.abs(p.end - s.end) < 1);
+    list.append(el("button", {
+      type: "button",
+      class: `chip section-chip${s.kind === "instrumental" ? " is-instrumental" : ""}${exists ? " is-saved" : ""}`,
+      title: `${fmtClock(s.start)}–${fmtClock(s.end)} · ${SECTION_SOURCE[s.source] || ""}${exists ? " · já é uma parte" : ""}\nClique para ouvir em loop`,
+      onclick: () => playSelectionLoop({ kind: "range", name: s.name, start: s.start, end: s.end, color: RANGE_COLOR }),
+    }, s.name, el("small", {}, fmtClock(s.start, 0))));
+  }
+  $("sectionsToPartsBtn").disabled = sections.every((s) =>
+    saved.some((p) => p.name === s.name && Math.abs(p.start - s.start) < 1 && Math.abs(p.end - s.end) < 1));
+}
+
+$("sectionsToPartsBtn").addEventListener("click", async () => {
+  if (!state.project) return;
+  const btn = $("sectionsToPartsBtn");
+  btn.disabled = true;
+  try {
+    const data = await postJson(projectUrl("/parts/from-lyrics"), {});
+    state.project = data.job;
+    drawPartRegions();
+    renderPartList();
+    renderStructure();
+    renderSheetFilter();
+    banner(lEls.status, data.created
+      ? `${data.created} parte(s) criada(s) a partir da letra. Ajuste os limites na waveform se precisar.`
+      : "Todas as seções já eram partes.");
+  } catch (err) {
+    banner(lEls.status, `Erro ao criar as partes: ${err.message}`, "error");
+    btn.disabled = false;
+  }
+});
 
 function renderSheetFilter() {
   if (!state.project) return;
@@ -2314,6 +2522,271 @@ function updateSheet(t, force = false, ctx = SU.project) {
 
 // ---------- view: part ----------
 
+// ---------- part: scales of a solo (ear-training aid) ----------
+
+const S = {
+  partId: null,     // part the suggestions belong to
+  data: null,       // {scales, profile, sources, has_harmony}
+  selected: null,   // id ("11:minor_pentatonic") of the scale on display
+  chordPcs: null,   // pitch classes of the chord sounding now (null = none)
+  chordIdx: -2,
+  loading: false,
+  card: $("scaleCard"),
+  status: $("scaleStatus"),
+  body: $("scaleBody"),
+  list: $("scaleList"),
+  name: $("scaleName"),
+  desc: $("scaleDesc"),
+  notes: $("scaleNotes"),
+  extra: $("scaleExtra"),
+  fretboard: $("scaleFretboard"),
+  sources: $("scaleSources"),
+  useCheck: $("scaleUseCheck"),
+  playBtn: $("scalePlayBtn"),
+  engineHint: $("scaleEngineHint"),
+};
+const QUALITY_IVS = {
+  maj: [0, 4, 7], min: [0, 3, 7], 5: [0, 7], dim: [0, 3, 6], sus4: [0, 5, 7],
+  7: [0, 4, 7, 10], m7: [0, 3, 7, 10], maj7: [0, 4, 7, 11], m7b5: [0, 3, 6, 10],
+};
+
+function isSoloPart(part) {
+  const tp = part.transcription_params;
+  return /solo|riff|lead|fill|melodia/i.test(part.name) || (tp && tp.engine === "lead");
+}
+
+function selectedScale() {
+  if (!S.data || S.partId !== (currentPart() || {}).part_id) return null;
+  return S.data.scales.find((s) => s.id === S.selected) || null;
+}
+
+/** Scale id the transcription should use (lead engine only), or null. */
+function transcriptionScale() {
+  const s = selectedScale();
+  return s && S.useCheck.checked ? s.id : null;
+}
+
+function resetScales(part) {
+  S.partId = part.part_id;
+  S.data = null;
+  S.chordIdx = -2;
+  S.chordPcs = null;
+  const tp = part.transcription_params;
+  S.selected = (tp && tp.scale) || null;
+  S.useCheck.checked = !tp || tp.engine !== "lead" || !!tp.scale;
+  hide(S.body);
+  hide(S.status);
+  S.sources.textContent = "";
+  S.card.open = isSoloPart(part);
+  renderScaleEngineHint();
+  if (S.card.open) loadScales();
+}
+
+async function loadScales() {
+  const part = currentPart();
+  if (!part || S.loading) return;
+  const partId = part.part_id;
+  S.loading = true;
+  banner(S.status, "Ouvindo as notas do trecho...", "busy");
+  try {
+    const stem = els.selectedStemSelect.value || "";
+    const data = await api(projectUrl(`/parts/${partId}/scales?stem=${encodeURIComponent(stem)}`));
+    if ((currentPart() || {}).part_id !== partId) return;
+    S.partId = partId;
+    S.data = data;
+    if (!data.scales.some((s) => s.id === S.selected)) S.selected = data.scales.length ? data.scales[0].id : null;
+    hide(S.status);
+    renderScales();
+  } catch (err) {
+    if ((currentPart() || {}).part_id === partId) banner(S.status, `Erro: ${err.message}`, "error");
+  } finally {
+    S.loading = false;
+  }
+}
+
+function renderScales() {
+  const d = S.data;
+  show(S.body, !!(d && d.scales.length));
+  if (!d) return;
+  S.list.innerHTML = "";
+  d.scales.forEach((s, i) => {
+    const pct = Math.round(s.probability * 100);
+    const btn = el("button", {
+      type: "button",
+      role: "radio",
+      class: "scale-option" + (s.id === S.selected ? " selected" : ""),
+      "aria-checked": String(s.id === S.selected),
+      title: s.same_notes_as.length ? `Mesmas notas: ${s.same_notes_as.join(", ")}` : "",
+      onclick: () => {
+        S.selected = s.id;
+        renderScales();
+      },
+    },
+    el("span", { class: "scale-rank" }, String(i + 1)),
+    el("span", { class: "scale-option-main" },
+      el("strong", {}, s.name),
+      el("span", { class: "scale-option-notes muted small" }, s.notes.map((n) => n.name).join(" "))),
+    el("span", { class: "scale-prob", title: "Quanto esta escala explica o trecho, comparada às outras" },
+      el("span", { class: "scale-prob-bar" }, el("span", { style: `width:${Math.max(3, pct)}%` })),
+      el("span", { class: "small" }, pct < 1 ? "<1%" : `${pct}%`)));
+    S.list.append(btn);
+  });
+  S.sources.textContent = `Baseado em: ${d.sources.join(" · ")}.` +
+    (d.has_harmony ? "" : " Analise a harmonia na página da música para acertar melhor a tônica.") +
+    (currentPart().artifacts.midi ? "" : " Depois de gerar a tablatura, as notas transcritas também entram na conta.");
+  renderScaleDetail();
+}
+
+function renderScaleDetail() {
+  const s = selectedScale();
+  renderScaleEngineHint();
+  if (!s) return;
+  S.name.textContent = s.name;
+  S.desc.textContent = s.description;
+  S.notes.innerHTML = "";
+  const chord = S.chordPcs;
+  for (const n of s.notes) {
+    const heard = Math.min(1, n.share * 5);   // 20% of the line or more = full bar
+    S.notes.append(el("button", {
+      type: "button",
+      class: "scale-note" + (n.degree === "1" ? " root" : "") + (chord && chord.has(n.pc) ? " in-chord" : ""),
+      title: `${n.name} (${n.degree}) · ${Math.round(n.share * 100)}% do que o trecho toca. Clique para ouvir.`,
+      onclick: () => playPitches([scaleBaseMidi(s) + ((n.pc - s.root + 12) % 12)]),
+    },
+    el("strong", {}, n.name),
+    el("span", { class: "scale-degree" }, n.degree),
+    el("span", { class: "scale-heard" }, el("span", { style: `width:${Math.round(heard * 100)}%` }))));
+  }
+  const extra = [];
+  extra.push(`Cobre ${Math.round(s.coverage * 100)}% das notas ouvidas.`);
+  if (s.chord_fit !== null) extra.push(`Combina com ${Math.round(s.chord_fit * 100)}% dos acordes do trecho.`);
+  if (s.outside.length) extra.push(`Notas fora dela que aparecem: ${s.outside.map((o) => o.name).join(", ")} (passagem, bend ou outra escala).`);
+  if (s.same_notes_as.length) extra.push(`Mesmas notas de: ${s.same_notes_as.join(", ")}.`);
+  S.extra.textContent = extra.join(" ");
+  drawFretboard(s);
+}
+
+function renderScaleEngineHint() {
+  const s = selectedScale();
+  S.engineHint.textContent = s && S.useCheck.checked
+    ? `Escala usada para resolver notas ambíguas: ${s.name} (troque no card "Escalas").`
+    : "";
+}
+
+/** Fretboard with the scale's notes; high string on top, as in a tab. */
+function drawFretboard(s) {
+  const tuning = state.tunings.find((t) => t.id === els.tuningSelect.value) || { pitches: [40, 45, 50, 55, 59, 64] };
+  const strings = [...tuning.pitches].reverse();
+  const frets = Math.min(24, Math.max(12, Number(els.maxFretsInput.value) || 22));
+  const fw = 46, sh = 22, left = 34, top = 18;
+  const width = left + fw * (frets + 0.5);
+  const height = top + sh * (strings.length - 1) + 26;
+  const pcs = new Map(s.notes.map((n) => [n.pc, n]));
+  const chord = S.chordPcs;
+  const svg = S.fretboard;
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.style.minWidth = `${Math.round(width * 0.82)}px`;
+  const ns = "http://www.w3.org/2000/svg";
+  const add = (tag, attrs, text) => {
+    const e = document.createElementNS(ns, tag);
+    for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+    if (text !== undefined) e.textContent = text;
+    svg.append(e);
+    return e;
+  };
+  svg.innerHTML = "";
+  const x = (f) => (f === 0 ? left - fw * 0.45 : left + fw * (f - 0.5));
+  const bottom = top + sh * (strings.length - 1);
+  for (const f of [3, 5, 7, 9, 12, 15, 17, 19, 21, 24]) {
+    if (f > frets) continue;
+    add("text", { x: x(f), y: bottom + 20, class: "fb-fretnum" }, String(f));
+    if (f % 12 === 0) {
+      add("circle", { cx: x(f), cy: top + sh * 0.5 * (strings.length - 1) - sh, r: 4, class: "fb-inlay" });
+      add("circle", { cx: x(f), cy: top + sh * 0.5 * (strings.length - 1) + sh, r: 4, class: "fb-inlay" });
+    } else {
+      add("circle", { cx: x(f), cy: top + sh * 0.5 * (strings.length - 1), r: 4, class: "fb-inlay" });
+    }
+  }
+  for (let f = 0; f <= frets; f++) {
+    add("line", { x1: left + fw * f, x2: left + fw * f, y1: top, y2: bottom, class: f === 0 ? "fb-nut" : "fb-fret" });
+  }
+  strings.forEach((p, i) => {
+    const y = top + sh * i;
+    add("line", { x1: left, x2: left + fw * frets, y1: y, y2: y, class: "fb-string", "stroke-width": 0.8 + i * 0.25 });
+    for (let f = 0; f <= frets; f++) {
+      const pc = (p + f) % 12;
+      const n = pcs.get(pc);
+      if (!n) continue;
+      const cls = "fb-note" + (n.degree === "1" ? " root" : "") + (chord && chord.has(pc) ? " in-chord" : "");
+      const g = add("g", { class: cls, transform: `translate(${x(f)},${y})` });
+      const c = document.createElementNS(ns, "circle");
+      c.setAttribute("r", 9.5);
+      const t = document.createElementNS(ns, "text");
+      t.setAttribute("dy", "0.35em");
+      t.textContent = n.name;
+      const tip = document.createElementNS(ns, "title");
+      tip.textContent = `${n.name} (${n.degree}) · casa ${f}`;
+      g.append(c, t, tip);
+      g.addEventListener("click", () => playPitches([p + f]));
+    }
+  });
+}
+
+/** Mark the notes of the chord under the playhead on the chips and the fretboard. */
+function scaleSyncChord(t) {
+  if (!S.card.open || !selectedScale() || !harmonyIsCurrent()) return;
+  const idx = chordIndexAt(t);
+  if (idx === S.chordIdx) return;
+  S.chordIdx = idx;
+  const c = idx >= 0 ? H.data.chords[idx] : null;
+  S.chordPcs = c ? new Set((QUALITY_IVS[c.quality] || [0, 4, 7]).map((iv) => (c.root + iv) % 12)) : null;
+  renderScaleDetail();
+}
+
+// a tiny plucked synth, enough to hear the scale (the tab player's SoundFont is not loaded here)
+let scaleAudio = null;
+function scaleBaseMidi(s) {
+  return 52 + ((s.root - 4 + 12) % 12);   // the root between E3 and D#4
+}
+function playPitches(pitches, step = 0.26) {
+  scaleAudio = scaleAudio || new AudioContext();
+  const ctx = scaleAudio;
+  if (ctx.state === "suspended") ctx.resume();
+  const t0 = ctx.currentTime + 0.03;
+  pitches.forEach((p, i) => {
+    const t = t0 + i * step;
+    const osc = ctx.createOscillator();
+    const filt = ctx.createBiquadFilter();
+    const gain = ctx.createGain();
+    osc.type = "sawtooth";
+    osc.frequency.value = 440 * 2 ** ((p - 69) / 12);
+    filt.type = "lowpass";
+    filt.frequency.setValueAtTime(3200, t);
+    filt.frequency.exponentialRampToValueAtTime(700, t + 0.4);
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.exponentialRampToValueAtTime(0.22, t + 0.008);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.7);
+    osc.connect(filt).connect(gain).connect(ctx.destination);
+    osc.start(t);
+    osc.stop(t + 0.75);
+  });
+}
+
+S.playBtn.addEventListener("click", () => {
+  const s = selectedScale();
+  if (!s) return;
+  const base = scaleBaseMidi(s);
+  const up = s.notes.map((n) => base + ((n.pc - s.root + 12) % 12));
+  up.push(base + 12);
+  playPitches([...up, ...up.slice(0, -1).reverse()]);
+});
+S.card.addEventListener("toggle", () => {
+  if (S.card.open && !S.data && !S.loading) loadScales();
+});
+S.useCheck.addEventListener("change", renderScaleEngineHint);
+els.tuningSelect.addEventListener("change", () => selectedScale() && drawFretboard(selectedScale()));
+els.maxFretsInput.addEventListener("change", () => selectedScale() && drawFretboard(selectedScale()));
+
 async function renderPartView() {
   const part = currentPart();
   els.partNameInput.value = part.name;
@@ -2325,6 +2798,7 @@ async function renderPartView() {
   renderSourcePicker(part);
   restorePartSettings(part);
   renderPartResult(part, null);
+  resetScales(part);
 
   partWave = await createWave(els.partWave, els.partSource.value);
   const w = partWave;
@@ -2335,6 +2809,7 @@ async function renderPartView() {
     updateNowChord(t, false, CU.part);
     syncChordLane(CU.part);
     updateSheet(t, false, SU.part);
+    scaleSyncChord(t);
   };
   w.onTime(part.start);
   w.onInteraction = () => {};  // a click outside the excerpt does not switch the loop off: the toggle does
@@ -2344,6 +2819,7 @@ async function renderPartView() {
   w.ws.on("seeking", (t) => {
     updateNowChord(t, false, CU.part);
     updateSheet(t, false, SU.part);
+    scaleSyncChord(t);
   });
   hide($("partLyricsCard"));
   loadHarmony();
@@ -2476,7 +2952,10 @@ function renderStemSelect(part) {
 }
 
 function syncEngineControls() {
-  document.querySelectorAll(".basic-pitch-only").forEach((x) => show(x, els.engineSelect.value === "basic_pitch"));
+  const engine = els.engineSelect.value;
+  document.querySelectorAll(".basic-pitch-only").forEach((x) => show(x, engine === "basic_pitch"));
+  document.querySelectorAll(".lead-only").forEach((x) => show(x, engine === "lead"));
+  document.querySelectorAll(".engine-tuning").forEach((x) => show(x, engine !== "dettato"));
 }
 els.engineSelect.addEventListener("change", syncEngineControls);
 
@@ -2494,10 +2973,19 @@ function restorePartSettings(part) {
     els.suppressHarmonicsCheck.checked = tp.suppress_harmonics;
     els.onsetSlider.value = tp.onset_threshold;
     els.frameSlider.value = tp.frame_threshold;
+    if (tp.voicing_threshold) els.voicingSlider.value = tp.voicing_threshold;
+    els.monophonicCheck.checked = !!tp.monophonic;
     els.gateSlider.value = tp.noise_gate_db;
     els.bandpassCheck.checked = tp.bandpass_enabled;
   }
-  [els.onsetSlider, els.frameSlider, els.gateSlider, els.minLenSlider].forEach((s) => s.dispatchEvent(new Event("input")));
+  if (!tp) {
+    // a part named "Solo" / "Riff" starts on the monophonic engine
+    const single = /solo|riff|lead/i.test(part.name);
+    els.engineSelect.value = single ? "lead" : "dettato";
+    els.monophonicCheck.checked = single;
+  }
+  syncEngineControls();
+  [els.onsetSlider, els.frameSlider, els.voicingSlider, els.gateSlider, els.minLenSlider].forEach((s) => s.dispatchEvent(new Event("input")));
 }
 
 function renderPartResult(part, asciiText) {
@@ -2549,6 +3037,9 @@ els.generateBtn.addEventListener("click", async () => {
     stem: source === "stem" ? els.selectedStemSelect.value : "guitar",
     onset_threshold: Number(els.onsetSlider.value),
     frame_threshold: Number(els.frameSlider.value),
+    voicing_threshold: Number(els.voicingSlider.value),
+    scale: source === "stem" && els.engineSelect.value === "lead" ? transcriptionScale() : null,
+    monophonic: els.monophonicCheck.checked,
     noise_gate_db: Number(els.gateSlider.value),
     bandpass_enabled: els.bandpassCheck.checked,
     minimum_note_length_ms: Number(els.minLenSlider.value),
@@ -2571,6 +3062,7 @@ els.generateBtn.addEventListener("click", async () => {
     state.project = { ...state.project, parts: data.job.parts };
     hide(els.partStatus);
     renderPartResult(currentPart(), data.ascii_preview);
+    if (S.card.open) loadScales();  // the transcribed notes are better evidence than the raw audio
   } catch (err) {
     banner(els.partStatus, `Erro: ${err.message}`, "error");
   } finally {
@@ -2792,6 +3284,7 @@ function bindSlider(slider, out, fmt) {
 }
 bindSlider(els.onsetSlider, els.onsetVal, (v) => Number(v).toFixed(2));
 bindSlider(els.frameSlider, els.frameVal, (v) => Number(v).toFixed(2));
+bindSlider(els.voicingSlider, els.voicingVal, (v) => Number(v).toFixed(2));
 bindSlider(els.gateSlider, els.gateVal, (v) => v);
 bindSlider(els.minLenSlider, els.minLenVal, (v) => v);
 

@@ -311,6 +311,169 @@ def lines_to_text(lines: list[dict[str, Any]]) -> str:
     return "\n".join(out)
 
 
+# ---------- song structure ----------
+
+PART_GAP_S = 8.0          # a pause in the singing this long between blocks is an instrumental part
+TAGGED_GAP_S = 2.0        # ... or this long when an empty tag ([Solo], [Intro]) names it
+UNTAGGED_SPLIT_S = 3.0    # no tags nor blank lines: a pause this long between lines starts a new block
+LEAD_IN_S = 0.3           # a section starts a little before its first sung word
+SNAP_BEFORE_S = 1.5       # a chord change this close before the first word is the section's start
+SNAP_PICKUP_S = 0.25      # ... or this close after it (the word was sung just ahead of the beat)
+REPEAT_SIM = 0.75         # blocks this similar (text) are the same section: the chorus
+MIN_SECTION_S = 0.5
+
+
+def _outline(text: str) -> list[tuple[Optional[str], int]]:
+    """Tags in order with the number of sung lines under each (0 = an instrumental tag like [Solo]).
+    Lines before the first tag come as (None, n)."""
+    out: list[list[Any]] = []
+    for raw in text.replace("\r\n", "\n").split("\n"):
+        m = SECTION_RE.match(raw)
+        if m:
+            out.append([section_label(m.group(1)), 0])
+        elif raw.split():
+            if not out:
+                out.append([None, 0])
+            out[-1][1] += 1
+    return [(name, n) for name, n in out]
+
+
+def _blocks(text: str, lines: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
+    """Sung lines grouped into blocks {name, lines, gap_names} (+ empty tags after the last block).
+
+    By the tags when there are any, else by blank lines, else by pauses in the singing."""
+    outline = _outline(text) if text else []
+    if any(name for name, _ in outline) and sum(n for _, n in outline) == len(lines):
+        blocks: list[dict[str, Any]] = []
+        pending: list[str] = []
+        k = 0
+        for name, n in outline:
+            if n == 0:
+                pending.append(name)
+                continue
+            blocks.append({"name": name, "lines": lines[k : k + n], "gap_names": pending})
+            pending, k = [], k + n
+        return blocks, pending
+    groups: list[list[dict[str, Any]]] = []
+    for i, line in enumerate(lines):
+        if not groups or line.get("para") or line.get("new_section"):
+            groups.append([line])
+        else:
+            groups[-1].append(line)
+    if len(groups) == 1 and len(lines) > 4:  # one long run (a Whisper draft): split at the pauses
+        groups = [[lines[0]]]
+        for prev, line in zip(lines, lines[1:]):
+            if line["start"] - prev["end"] >= UNTAGGED_SPLIT_S:
+                groups.append([line])
+            else:
+                groups[-1].append(line)
+    return [{"name": None, "lines": g, "gap_names": []} for g in groups], []
+
+
+def _block_text(block: dict[str, Any]) -> str:
+    return " ".join(norm_word(w["text"]) for line in block["lines"] for w in line["words"])
+
+
+def _name_blocks(blocks: list[dict[str, Any]]) -> None:
+    """Untagged blocks: like a tagged block -> its name; repeated -> "Refrão"; the rest "Verso N"."""
+    texts = [_block_text(b) for b in blocks]
+
+    def similar(i: int, j: int) -> bool:
+        return SequenceMatcher(None, texts[i], texts[j], autojunk=False).ratio() >= REPEAT_SIM
+
+    for b in blocks:
+        b["source"] = "tag" if b["name"] else None
+    tagged = [i for i, b in enumerate(blocks) if b["name"]]
+    verse = 0
+    for i, b in enumerate(blocks):
+        if b["name"]:
+            continue
+        twin = next((j for j in tagged if similar(i, j)), None)
+        if twin is not None:
+            b["name"], b["source"] = blocks[twin]["name"], "repeat"
+        elif any(similar(i, j) for j in range(len(blocks)) if j != i and not blocks[j]["source"] == "tag"):
+            b["name"], b["source"] = "Refrão", "repeat"
+        else:
+            verse += 1
+            b["name"], b["source"] = f"Verso {verse}", "guess"
+    if verse == 1:  # a single guessed verse needs no number
+        for b in blocks:
+            if b["source"] == "guess":
+                b["name"] = "Verso"
+
+
+def _snap(t: float, lo: float, hi: float, changes: list[float]) -> Optional[float]:
+    inside = [c for c in changes if lo <= c <= hi]
+    return min(inside, key=lambda c: abs(c - t)) if inside else None
+
+
+def infer_sections(
+    text: str, lines: list[dict[str, Any]], chords: list[dict[str, Any]], duration: float
+) -> list[dict[str, Any]]:
+    """The song's parts from the timed lyrics: [{name, start, end, kind, source}] covering 0..duration.
+
+    kind: "sung" or "instrumental"; source: "tag" (named by the lyrics), "repeat" (same text as
+    another block: the chorus), "gap" (a long pause in the singing) or "guess" (an untagged block)."""
+    if not lines:
+        return []
+    blocks, tail_names = _blocks(text, lines)
+    _name_blocks(blocks)
+    changes = sorted({round(c["start"], 3) for c in chords if c.get("start", 0) > 0})
+    duration = max(duration, lines[-1]["end"])
+    for b in blocks:
+        b["first"], b["last"] = b["lines"][0]["start"], b["lines"][-1]["end"]
+
+    def start_of(b: dict[str, Any], floor: float) -> float:
+        t = b["first"]
+        snapped = _snap(t, max(floor, t - SNAP_BEFORE_S), t + SNAP_PICKUP_S, changes)
+        return snapped if snapped is not None else max(floor, t - LEAD_IN_S)
+
+    def tail_of(b: dict[str, Any], ceil: float) -> float:
+        t = b["last"]
+        snapped = _snap(t, t, min(ceil, t + SNAP_BEFORE_S), changes)
+        return snapped if snapped is not None else min(ceil, t + 0.5)
+
+    def is_part(gap: float, names: list[str]) -> bool:
+        return gap >= (TAGGED_GAP_S if names else PART_GAP_S)
+
+    def instrumental(names: list[str], default: str) -> dict[str, Any]:
+        return {"name": " / ".join(names) or default, "kind": "instrumental", "source": "tag" if names else "gap"}
+
+    sections: list[dict[str, Any]] = []
+    first = blocks[0]
+    if is_part(first["first"], first["gap_names"]):
+        sections.append({**instrumental(first["gap_names"], "Intro"), "start": 0.0})
+        sections.append({"name": first["name"], "kind": "sung", "source": first["source"],
+                         "start": start_of(first, 0.0)})
+    else:
+        sections.append({"name": first["name"], "kind": "sung", "source": first["source"], "start": 0.0})
+    for cur, nxt in zip(blocks, blocks[1:]):
+        gap = nxt["first"] - cur["last"]
+        if is_part(gap, nxt["gap_names"]):
+            sections.append({**instrumental(nxt["gap_names"], "Instrumental"), "start": tail_of(cur, nxt["first"])})
+            floor = sections[-1]["start"]
+        else:
+            floor = cur["last"]
+        sections.append({"name": nxt["name"], "kind": "sung", "source": nxt["source"], "start": start_of(nxt, floor)})
+    last = blocks[-1]
+    if is_part(duration - last["last"], tail_names):
+        sections.append({**instrumental(tail_names, "Outro"), "start": tail_of(last, duration)})
+    for s, nxt in zip(sections, sections[1:] + [None]):
+        s["end"] = nxt["start"] if nxt else duration
+    sections = [s for s in sections if s["end"] - s["start"] >= MIN_SECTION_S]
+    # the same name more than once (Refrão, Refrão): number the occurrences
+    counts: dict[str, int] = {}
+    for s in sections:
+        counts[s["name"]] = counts.get(s["name"], 0) + 1
+    seen: dict[str, int] = {}
+    for s in sections:
+        if counts[s["name"]] > 1:
+            seen[s["name"]] = seen.get(s["name"], 0) + 1
+            s["name"] = f"{s['name']} ({seen[s['name']]})"
+        s["start"], s["end"] = round(s["start"], 2), round(s["end"], 2)
+    return sections
+
+
 # ---------- chord sheet ----------
 
 def _chord_fn(c: dict[str, Any], field: list[dict[str, Any]]) -> str:

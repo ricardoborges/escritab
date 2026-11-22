@@ -21,6 +21,8 @@ dependencies = [
     "dettato",
     "hf_xet>=1.0",  # faster Hugging Face downloads of the Dettato weights
     "openai-whisper>=20250625",
+    "torchcrepe>=0.0.24",
+    "bs-roformer>=1.4.1",
 ]
 
 [project.optional-dependencies]

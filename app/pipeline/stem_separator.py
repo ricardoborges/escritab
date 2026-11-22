@@ -81,6 +81,9 @@ def separate_stems(
         sf.write(str(dst_path), audio, sr)
         return {"guitar": dst_name}, "bypass"
 
+    if model_name == "roformer_htdemucs_6s":
+        return _separate_roformer_then_demucs(input_audio_path, job_dir)
+
     demucs_tmp = job_dir / "_demucs_tmp"
     demucs_tmp.mkdir(parents=True, exist_ok=True)
 
@@ -106,3 +109,29 @@ def separate_stems(
             continue
 
     raise RuntimeError(f"All stem separation attempts failed: {last_err}")
+
+
+def _separate_roformer_then_demucs(input_audio_path: Path, job_dir: Path) -> tuple[dict[str, str], str]:
+    """BS-RoFormer vocals (far less bleed than Demucs), then htdemucs_6s on the clean instrumental
+    for guitar / bass / drums / piano / other. Falls back to plain htdemucs_6s without bs-roformer."""
+    from app.pipeline import roformer_separator
+
+    if not roformer_separator.is_available():
+        stems, device = separate_stems(input_audio_path, job_dir, model_name="htdemucs_6s")
+        return stems, f"{device} (htdemucs_6s; bs-roformer não instalado)"
+
+    instrumental = job_dir / "_roformer_instrumental.wav"
+    vocals = job_dir / "_roformer_vocals.wav"
+    try:
+        roformer_separator.separate_vocals(input_audio_path, vocals, instrumental)
+    finally:
+        roformer_separator.unload()
+    try:
+        stems, device = separate_stems(instrumental, job_dir, model_name="htdemucs_6s")
+    finally:
+        instrumental.unlink(missing_ok=True)
+    # Demucs' vocals from an instrumental are only residue: the RoFormer vocals replace them
+    vocals.replace(job_dir / "stem_vocals.wav")
+    stems["vocals"] = "stem_vocals.wav"
+    order = [k for k in STEM_NAMES_6S if k in stems]
+    return {k: stems[k] for k in order}, f"{device} (BS-RoFormer + htdemucs_6s)"

@@ -45,7 +45,7 @@ def _clamp_notes_to_tuning(
             while p > max_pitch:
                 p -= 12
             adjusted_count += 1
-        clamped = NoteEvent(pitch=p, start=n.start, end=n.end, velocity=n.velocity)
+        clamped = n.model_copy(update={"pitch": p})
         if p not in by_pitch or clamped.velocity > by_pitch[p].velocity:
             by_pitch[p] = clamped
 
@@ -268,6 +268,7 @@ def optimize_fretboard(
                 start=item[2].start,
                 end=item[2].end,
                 velocity=item[2].velocity,
+                bend=item[2].bend,
             )
             for item in state
         ]

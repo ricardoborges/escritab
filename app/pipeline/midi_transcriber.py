@@ -126,6 +126,36 @@ def _run_basic_pitch_or_fallback(
     return notes
 
 
+def reduce_to_monophonic(notes: list[NoteEvent], onset_window_s: float = 0.030) -> list[NoteEvent]:
+    """One note at a time: per onset group keep the loudest note (ties -> the lower one, since a
+    polyphonic model's extra notes are mostly harmonics above the played note), drop notes that
+    start while a much louder note is still ringing, then cut each note at the next onset."""
+    if not notes:
+        return []
+    ordered = sorted(notes, key=lambda n: (n.start, n.pitch))
+    picked: list[NoteEvent] = []
+    i = 0
+    while i < len(ordered):
+        j = i + 1
+        while j < len(ordered) and ordered[j].start - ordered[i].start <= onset_window_s:
+            j += 1
+        best = max(ordered[i:j], key=lambda n: (n.velocity, -n.pitch))
+        # a quiet onset under a sustaining louder note is bleed / a ghost, not a new note
+        if picked and best.start < picked[-1].end and best.velocity < 0.5 * picked[-1].velocity:
+            i = j
+            continue
+        picked.append(best)
+        i = j
+    out: list[NoteEvent] = []
+    for k, n in enumerate(picked):
+        end = n.end
+        if k + 1 < len(picked):
+            end = min(end, picked[k + 1].start)
+        if end - n.start > 0.005:
+            out.append(n.model_copy(update={"end": end}))
+    return out
+
+
 def postprocess_notes(
     notes: list[NoteEvent],
     params: TranscriptionParams,
@@ -152,9 +182,7 @@ def postprocess_notes(
             while pitch > max_pitch:
                 pitch -= 12
             out_of_range_adjusted += 1
-        duration_filtered.append(
-            NoteEvent(pitch=pitch, start=n.start, end=n.end, velocity=n.velocity)
-        )
+        duration_filtered.append(n.model_copy(update={"pitch": pitch}))
 
     # Harmonic suppression (+12 octave and +19 octave+fifth within 35ms onset window)
     harmonics_removed = 0
@@ -202,6 +230,12 @@ def postprocess_notes(
         polyphony_capped.extend(unique_group)
         i = j
 
+    monophonic_removed = 0
+    if params.monophonic:
+        before = len(polyphony_capped)
+        polyphony_capped = reduce_to_monophonic(polyphony_capped)
+        monophonic_removed = before - len(polyphony_capped)
+
     # Optional rhythmic quantization
     final_notes: list[NoteEvent] = []
     if params.quantize_grid in ("1/16", "1/32") and params.bpm > 0:
@@ -211,12 +245,7 @@ def postprocess_notes(
             q_start = round(n.start / step) * step
             q_end = max(q_start + step, round(n.end / step) * step)
             final_notes.append(
-                NoteEvent(
-                    pitch=n.pitch,
-                    start=round(q_start, 6),
-                    end=round(q_end, 6),
-                    velocity=n.velocity,
-                )
+                n.model_copy(update={"start": round(q_start, 6), "end": round(q_end, 6)})
             )
     else:
         final_notes = polyphony_capped
@@ -225,6 +254,7 @@ def postprocess_notes(
         "short_notes_removed": short_removed,
         "harmonics_removed": harmonics_removed,
         "out_of_range_adjusted": out_of_range_adjusted,
+        "monophonic_removed": monophonic_removed,
         "total_notes": len(final_notes),
     }
     return final_notes, stats
@@ -277,6 +307,21 @@ def _extract_raw_notes(
     params: TranscriptionParams,
 ) -> tuple[list[NoteEvent], str]:
     """Run the requested engine; fall back to Basic Pitch if Dettato is missing or fails."""
+    if params.engine == "lead":
+        from app.pipeline import lead_transcriber
+
+        lo, hi = _tuning_pitch_bounds(params.tuning, params.max_frets)
+        y, _ = librosa.load(str(audio_path), sr=lead_transcriber.SR, mono=True)
+        notes, info = lead_transcriber.transcribe_lead(
+            y,
+            lead_transcriber.SR,
+            fmin=float(librosa.midi_to_hz(lo - 1)),
+            fmax=float(librosa.midi_to_hz(hi + 1)),
+            min_note_s=params.minimum_note_length_ms / 1000.0,
+            voicing_threshold=params.voicing_threshold,
+            onset_threshold=params.onset_threshold,
+        )
+        return notes, f"lead ({info['tracker']}, afinação {info['tuning_offset_cents']:+.0f} cents)"
     if params.engine == "dettato":
         from app.pipeline import dettato_transcriber
 

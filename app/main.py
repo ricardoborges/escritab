@@ -256,6 +256,17 @@ def create_app(workspace_root: Path | str = Path("workspace/jobs")) -> FastAPI:
         manager.save_job(job)
         return {"job": job, "part": part}
 
+    @app.post("/api/projects/{project_id}/parts/from-lyrics")
+    def create_parts_from_lyrics(project_id: str):
+        """One part per section of the aligned lyrics ([Verse], [Chorus]... or inferred)."""
+        job, job_dir = load(project_id)
+        try:
+            created = projects.parts_from_lyrics(job, job_dir)
+        except PartError as exc:
+            raise part_error(exc) from exc
+        manager.save_job(job)
+        return {"job": job, "created": len(created)}
+
     @app.patch("/api/projects/{project_id}/parts/{part_id}")
     def update_part(project_id: str, part_id: str, req: PartUpdate):
         job, job_dir = load(project_id)
@@ -302,6 +313,16 @@ def create_app(workspace_root: Path | str = Path("workspace/jobs")) -> FastAPI:
             raise part_error(exc) from exc
         manager.save_job(job)
         return {"job": job, "part": part, "ascii_preview": ascii_tab}
+
+    @app.get("/api/projects/{project_id}/parts/{part_id}/scales")
+    def get_part_scales(project_id: str, part_id: str, stem: str | None = None):
+        """Scales the excerpt is probably built on (best first), to help figuring a solo out by ear."""
+        job, job_dir = load(project_id)
+        try:
+            part = projects.find_part(job, part_id)
+            return projects.part_scales(job, job_dir, part, stem)
+        except PartError as exc:
+            raise part_error(exc) from exc
 
     @app.get("/api/projects/{project_id}/parts/{part_id}/files/{filename}")
     def get_part_file(project_id: str, part_id: str, filename: str):

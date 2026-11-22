@@ -85,3 +85,18 @@ def test_midi_roundtrip_and_audio_transcription(tmp_path: Path):
 
     reloaded = midi_file_to_notes(midi_path)
     assert len(reloaded) == len(notes)
+
+
+def test_monophonic_reduction_keeps_one_voice():
+    from app.pipeline.midi_transcriber import reduce_to_monophonic
+
+    notes = [
+        NoteEvent(pitch=64, start=0.00, end=0.40, velocity=100),
+        NoteEvent(pitch=76, start=0.01, end=0.30, velocity=60),   # octave ghost at the same onset
+        NoteEvent(pitch=67, start=0.20, end=0.50, velocity=30),   # quiet bleed under the first note
+        NoteEvent(pitch=69, start=0.50, end=0.90, velocity=95, bend=2.0),
+    ]
+    out = reduce_to_monophonic(notes)
+    assert [n.pitch for n in out] == [64, 69]
+    assert out[0].end == 0.40
+    assert out[1].bend == 2.0

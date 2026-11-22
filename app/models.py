@@ -72,8 +72,9 @@ TUNINGS: dict[str, TuningPreset] = {
 
 
 class TranscriptionParams(BaseModel):
-    # "dettato": multi-instrument neural transcriber (default); "basic_pitch": legacy single-stem model
-    engine: Literal["dettato", "basic_pitch"] = "dettato"
+    # "dettato": multi-instrument neural transcriber (default); "basic_pitch": legacy single-stem model;
+    # "lead": monophonic pitch tracker (CREPE) for solos and single-note riffs
+    engine: Literal["dettato", "basic_pitch", "lead"] = "dettato"
     # "stem": transcribe the selected Demucs stem(s); "multitrack": reuse tracks of the full-song Dettato MIDI
     source: Literal["stem", "multitrack"] = "stem"
     # multitrack only: indices of the full-song MIDI tracks to put on the tab (empty = every guitar track)
@@ -86,6 +87,13 @@ class TranscriptionParams(BaseModel):
     onset_threshold: float = Field(default=0.5, ge=0.1, le=0.95)
     frame_threshold: float = Field(default=0.3, ge=0.1, le=0.9)
     minimum_note_length_ms: float = Field(default=60.0, ge=15.0, le=300.0)
+    # lead engine: minimum CREPE periodicity (0-1) for a frame to count as a played note
+    voicing_threshold: float = Field(default=0.45, ge=0.1, le=0.95)
+    # lead engine: scale of the solo ("<root pc>:<type>", e.g. "11:minor_pentatonic"); ambiguous
+    # pitches are rounded to its notes. None = no scale bias
+    scale: Optional[str] = Field(default=None, max_length=40)
+    # keep one note at a time (solos / single-note riffs): drops ghost notes polyphonic models add
+    monophonic: bool = False
     suppress_harmonics: bool = True
     harmonic_velocity_ratio: float = Field(default=0.75, ge=0.2, le=1.0)
     quantize_grid: Optional[Literal["off", "1/16", "1/32"]] = "off"
@@ -106,6 +114,7 @@ class NoteEvent(BaseModel):
     start: float
     end: float
     velocity: int = 80
+    bend: float = 0.0  # semitones the note is bent up to after the attack (0 = plain note)
 
 
 class FrettedNote(BaseModel):
@@ -115,6 +124,7 @@ class FrettedNote(BaseModel):
     start: float
     end: float
     velocity: int = 80
+    bend: float = 0.0
 
 
 class TabSlice(BaseModel):
@@ -129,7 +139,8 @@ class MultitrackRequest(BaseModel):
 
 
 class SeparateRequest(BaseModel):
-    model: Literal["htdemucs_6s", "htdemucs"] = "htdemucs_6s"
+    # "roformer_htdemucs_6s": BS-RoFormer removes the vocals, then htdemucs_6s splits the instrumental
+    model: Literal["roformer_htdemucs_6s", "htdemucs_6s", "htdemucs"] = "htdemucs_6s"
 
 
 class MidiTrackInfo(BaseModel):
