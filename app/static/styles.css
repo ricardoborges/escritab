@@ -3180,3 +3180,70 @@ details.scale-card:not([open]) {
   text-decoration: line-through;
   opacity: 0.6;
 }
+
+/* player options (gear): pushed to the right end of the song transport */
+.tp-gear {
+  margin-left: auto;
+}
+.tp-group-right .tp-gear {
+  margin-left: 0;
+}
+.tp-gear svg {
+  width: 16px;
+  height: 16px;
+}
+.tp-gear.has-count {
+  color: #93b4ff;
+  border-color: rgba(91, 141, 239, 0.55);
+}
+.player-opts-dialog {
+  width: min(380px, calc(100vw - 2rem));
+}
+.player-opts-dialog .settings-body {
+  gap: 0.6rem;
+  padding: 1rem 1.25rem 1.25rem;
+}
+.opt-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.6rem 0;
+  border-top: 1px solid var(--border);
+  cursor: pointer;
+}
+.opt-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+.opt-text small {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+.opt-row input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--primary);
+}
+/* while counting in, the play button shows the beat number and pulses on each click */
+.tp-play.is-counting {
+  background: #b7791f;
+  border-color: #d69e2e;
+}
+.tp-play.is-counting svg {
+  display: none !important;
+}
+.tp-play.is-counting::after {
+  content: attr(data-count);
+  font-size: 1.05rem;
+  font-weight: 800;
+  color: #fff;
+}
+.tp-play.count-tick {
+  animation: count-tick 0.18s ease-out;
+}
+@keyframes count-tick {
+  from { transform: scale(1.14); }
+  to { transform: scale(1); }
+}

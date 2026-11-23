@@ -767,10 +767,113 @@ function renderModelDownloads() {
 }
 
 function showView(view) {
+  cancelCountIn();
   state.view = view;
   document.querySelectorAll(".view").forEach((v) => show(v, v.dataset.view === view));
   renderBreadcrumbs();
   window.scrollTo({ top: 0 });
+}
+
+// ---------- count-in: 3 or 5 clicks at the song's tempo before playing ----------
+// "Contagem" (one setting for the song and the part players) gives the player time to get ready:
+// Play waits that many beats of the project BPM (scaled by the playback speed) with a click on each.
+
+const COUNT_IN_KEY = "escritab.countIn";
+const COUNT_IN_OPTIONS = ["0", "3", "5"];
+const CI = { ctx: null, timers: [], btn: null };
+const countInSelect = $("countInSelect");
+
+/** Beats to count before playing (0 = off). */
+function countInBeats() {
+  return Number(countInSelect.value) || 0;
+}
+/** The gear buttons light up while the count-in is on, since the setting itself is hidden in the dialog. */
+function setCountInUi(value) {
+  countInSelect.value = value;
+  for (const b of document.querySelectorAll(".player-opts-btn")) b.classList.toggle("has-count", value !== "0");
+}
+try {
+  const saved = localStorage.getItem(COUNT_IN_KEY);
+  setCountInUi(saved === "on" ? "3" : COUNT_IN_OPTIONS.includes(saved) ? saved : "0");  // "on": older on/off setting
+} catch {
+  setCountInUi("0");  // storage unavailable: starts off
+}
+countInSelect.addEventListener("change", () => {
+  setCountInUi(countInSelect.value);
+  try {
+    localStorage.setItem(COUNT_IN_KEY, countInSelect.value);
+  } catch { /* storage unavailable */ }
+  if (!countInBeats()) cancelCountIn();
+});
+
+// player options dialog (gear in the song and the part transports); "encaixar na batida" only applies to the song
+const playerOptsDialog = $("playerOptsDialog");
+for (const id of ["projOptsBtn", "partOptsBtn"]) {
+  $(id).addEventListener("click", () => {
+    show($("snapOptRow"), state.view === "project");
+    playerOptsDialog.showModal();
+  });
+}
+playerOptsDialog.addEventListener("click", (e) => {
+  if (e.target === playerOptsDialog) playerOptsDialog.close();  // click on the backdrop closes it
+});
+
+function countingIn() {
+  return CI.btn !== null;
+}
+function cancelCountIn() {
+  for (const t of CI.timers) clearTimeout(t);
+  CI.timers = [];
+  if (CI.btn) {
+    CI.btn.classList.remove("is-counting", "count-tick");
+    delete CI.btn.dataset.count;
+    CI.btn.setAttribute("aria-label", "Play");
+  }
+  CI.btn = null;
+}
+function countInClick(ctx, when, accent) {
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.frequency.value = accent ? 1600 : 1050;
+  gain.gain.setValueAtTime(0.0001, when);
+  gain.gain.exponentialRampToValueAtTime(0.7, when + 0.002);
+  gain.gain.exponentialRampToValueAtTime(0.0001, when + 0.07);
+  osc.connect(gain).connect(ctx.destination);
+  osc.start(when);
+  osc.stop(when + 0.08);
+}
+/** Run play() now, or after the count-in when "Contagem" is on (and the BPM is known). */
+function playWithCountIn(btn, rate, play) {
+  cancelCountIn();
+  const bpm = Number(state.project && state.project.detected_bpm);
+  const beats = countInBeats();
+  if (!beats || !(bpm > 0)) {
+    play();
+    return;
+  }
+  CI.ctx = CI.ctx || new AudioContext();
+  const ctx = CI.ctx;
+  if (ctx.state === "suspended") ctx.resume();
+  const beat = 60 / (bpm * (rate > 0 ? rate : 1));
+  const lead = 0.06;  // schedule slightly ahead so the first click is not clipped
+  const t0 = ctx.currentTime + lead;
+  CI.btn = btn;
+  btn.classList.add("is-counting");
+  btn.dataset.count = "";
+  btn.setAttribute("aria-label", "Cancelar contagem");
+  for (let i = 0; i < beats; i++) {
+    countInClick(ctx, t0 + i * beat, i === 0);
+    CI.timers.push(setTimeout(() => {
+      btn.dataset.count = String(i + 1);
+      btn.classList.remove("count-tick");
+      void btn.offsetWidth;  // restart the pulse animation
+      btn.classList.add("count-tick");
+    }, (lead + i * beat) * 1000));
+  }
+  CI.timers.push(setTimeout(() => {
+    cancelCountIn();
+    play();
+  }, (lead + beats * beat) * 1000));
 }
 
 function renderBreadcrumbs() {
@@ -2601,6 +2704,10 @@ function renderPartList() {
 els.projPlayBtn.addEventListener("click", () => {
   const w = projWave;
   if (!w) return;
+  if (countingIn()) {  // a second press during the count-in cancels it
+    cancelCountIn();
+    return;
+  }
   if (w.ws.isPlaying()) {
     w.ws.pause();
     return;
@@ -2609,14 +2716,15 @@ els.projPlayBtn.addEventListener("click", () => {
     const t = w.ws.getCurrentTime();
     if (t < w.loop.start || t >= w.loop.end - 0.05) w.ws.setTime(w.loop.start);
   }
-  w.ws.play();
+  playWithCountIn(els.projPlayBtn, Number(els.projRate.value) / 100, () => w.ws.play());
 });
 // DAW-style stop: the first press stops right there (Play continues from it); pressing it again
 // while stopped goes back to the start of the looped section, or of the song
 els.projStopBtn.addEventListener("click", () => {
   const w = projWave;
   if (!w) return;
-  if (w.ws.isPlaying()) w.ws.pause();
+  if (countingIn()) cancelCountIn();
+  else if (w.ws.isPlaying()) w.ws.pause();
   else w.ws.setTime(w.loop ? w.loop.start : 0);
 });
 // ---------- player audio: the original mix or one or more stems together ----------
@@ -4723,6 +4831,10 @@ function syncPartLoop() {
 els.partPlayBtn.addEventListener("click", () => {
   const w = partWave;
   if (!w) return;
+  if (countingIn()) {  // a second press during the count-in cancels it
+    cancelCountIn();
+    return;
+  }
   if (w.ws.isPlaying()) {
     w.ws.pause();
     return;
@@ -4732,12 +4844,13 @@ els.partPlayBtn.addEventListener("click", () => {
   syncPartLoop();
   // looping: start from the excerpt when the cursor is outside it; otherwise play from the cursor
   if (w.loop && (t < start || t >= end - 0.05)) w.ws.setTime(start);
-  w.ws.play();
+  playWithCountIn(els.partPlayBtn, Number(els.partRate.value) / 100, () => w.ws.play());
 });
 els.partStopBtn.addEventListener("click", () => {
   const w = partWave;
   if (!w) return;
-  if (w.ws.isPlaying()) w.ws.pause();  // same DAW-style stop as the song player
+  if (countingIn()) cancelCountIn();
+  else if (w.ws.isPlaying()) w.ws.pause();  // same DAW-style stop as the song player
   else w.ws.setTime(w.excerpt.start);
 });
 
@@ -4757,16 +4870,18 @@ function playPartFromStart() {
   const w = partWave;
   if (!w || !w.excerpt) return;
   syncPartLoop();
+  if (w.ws.isPlaying()) w.ws.pause();  // from the start = a fresh take: the count-in runs again
   w.ws.setTime(w.excerpt.start);
-  w.ws.play();
+  playWithCountIn(els.partPlayBtn, Number(els.partRate.value) / 100, () => w.ws.play());
 }
 $("partFromStartBtn").addEventListener("click", playPartFromStart);
 /** Song player: from the start of the selected section, or of the song when nothing is selected. */
 function playProjectFromStart() {
   const w = projWave;
   if (!w) return;
+  if (w.ws.isPlaying()) w.ws.pause();  // from the start = a fresh take: the count-in runs again
   w.ws.setTime(sel.cur ? sel.cur.start : 0);
-  w.ws.play();
+  playWithCountIn(els.projPlayBtn, Number(els.projRate.value) / 100, () => w.ws.play());
 }
 $("projFromStartBtn").addEventListener("click", playProjectFromStart);
 

@@ -108,10 +108,7 @@
             <button type="button" class="tp-select src-btn" id="projSourceBtn" aria-haspopup="true" aria-expanded="false" title="Escolher o que tocar: a música original ou um ou mais stems juntos">Mix original</button>
             <div class="src-menu hidden" id="projSourceMenu" role="group" aria-label="O que tocar"></div>
           </div>
-          <label class="tp-toggle tp-icon-only" title="Encaixar na batida: as bordas do trecho grudam na batida mais próxima" aria-label="Encaixar na batida">
-            <input type="checkbox" id="snapCheck" checked />
-            <span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h4v8a3 3 0 0 0 6 0V4h4v8a7 7 0 0 1-14 0V4z" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"/><path d="M5 8h4M15 8h4" stroke="currentColor" stroke-width="2.2"/></svg></span>
-          </label>
+          <button type="button" class="tp-btn tp-btn-square tp-gear player-opts-btn" id="projOptsBtn" aria-label="Opções do player" aria-haspopup="dialog" title="Opções do player: contagem antes de tocar, encaixar na batida"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
         </div>
         <div id="selectionBar" class="selection-bar">
           <span id="selDot" class="sel-dot"></span>
@@ -544,6 +541,7 @@
               <input type="checkbox" id="partLoopCheck" checked />
               <span><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2l3 3-3 3"/><path d="M4 11V9a4 4 0 0 1 4-4h12"/><path d="M7 22l-3-3 3-3"/><path d="M20 13v2a4 4 0 0 1-4 4H4"/></svg>Repetir trecho</span>
             </label>
+            <button type="button" class="tp-btn tp-btn-square tp-gear player-opts-btn" id="partOptsBtn" aria-label="Opções do player" aria-haspopup="dialog" title="Opções do player: contagem antes de tocar, encaixar na batida"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
           </div>
         </div>
         <div id="partWave" class="wave"></div>
@@ -823,6 +821,27 @@
       </div>
     </section>
   </main>
+
+  <dialog id="playerOptsDialog" class="settings-dialog player-opts-dialog" aria-labelledby="playerOptsTitle">
+    <form method="dialog" class="settings-body">
+      <div class="settings-head">
+        <h2 id="playerOptsTitle">Opções do player</h2>
+        <button type="submit" class="btn-outline btn-small" aria-label="Fechar">&#10005;</button>
+      </div>
+      <label class="opt-row" title="Antes de tocar, dá alguns cliques no andamento da música (BPM) para você se preparar">
+        <span class="opt-text"><strong>Contagem</strong><small>Cliques no andamento da música antes de começar a tocar</small></span>
+        <select id="countInSelect" class="tp-select">
+          <option value="0">Não</option>
+          <option value="3">3 tempos</option>
+          <option value="5">5 tempos</option>
+        </select>
+      </label>
+      <label class="opt-row" id="snapOptRow" title="As bordas do trecho grudam na batida mais próxima">
+        <span class="opt-text"><strong>Encaixar na batida</strong><small>Ao marcar um trecho, as bordas grudam na batida mais próxima</small></span>
+        <input type="checkbox" id="snapCheck" checked />
+      </label>
+    </form>
+  </dialog>
 
   <dialog id="settingsDialog" class="settings-dialog" aria-labelledby="settingsTitle">
     <form method="dialog" class="settings-body">
