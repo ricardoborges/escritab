@@ -3,7 +3,8 @@ from pathlib import Path
 import re
 from typing import Literal
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse
+from urllib.parse import quote
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from app.job_manager import JobManager
 import shutil
@@ -20,7 +21,7 @@ from app.models import (
     SeparateRequest,
     TUNINGS,
 )
-from app import projects
+from app import projects, qtab
 from app.projects import PartError
 from app.pipeline import dettato_transcriber, genius, model_downloads
 from app.pipeline.stem_separator import separate_stems
@@ -171,6 +172,24 @@ def create_app(workspace_root: Path | str = Path("workspace/jobs")) -> FastAPI:
         except PartError as exc:
             raise part_error(exc) from exc
         return FileResponse(path, media_type="audio/wav")
+
+    @app.get("/api/projects/{project_id}/export.qtab")
+    def export_qtab(project_id: str, stems: str = "", rate: float = 1.0,
+                    start: float | None = None, end: float | None = None, label: str = ""):
+        """Backing track + timed chords (and lyrics) for VstCam: [start, end) of the song, the chosen stems
+        (empty = original mix), slowed down to `rate` with every time already on that timeline."""
+        job, job_dir = load(project_id)
+        try:
+            data = qtab.build_qtab(job, job_dir, [s for s in stems.split(",") if s], rate, start, end)
+        except PartError as exc:
+            raise part_error(exc) from exc
+        name = qtab.qtab_filename(job, rate, label.strip()[:60])
+        ascii_name = name.encode("ascii", "ignore").decode() or "export.qtab"
+        return Response(
+            content=data,
+            media_type="application/zip",
+            headers={"Content-Disposition": f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(name)}"},
+        )
 
     @app.get("/api/projects/{project_id}/files/{filename}")
     def get_project_file(project_id: str, filename: str):

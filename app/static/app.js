@@ -1972,12 +1972,57 @@ function renderSelectionBar() {
   els.loopToggle.classList.toggle("active", !!s && els.loopCheck.checked);
   show(els.selClearBtn, !!s);
   show($("partEditBtn"), !!s && s.kind === "part" && !peEditing());
+  $("qtabExportBtn").title = `Exportar para o VstCam (.qtab): ${s ? `o trecho "${s.name}"` : "a música inteira"}, `
+    + "com o áudio que está tocando, na velocidade atual, e os acordes e a letra sincronizados";
 }
 
 els.loopCheck.addEventListener("change", () => {
   applyLoop();
   renderSelectionBar();
 });
+
+// ---------- export to VstCam (.qtab): what is playing, at the current speed, with the chords and lyrics ----------
+
+async function exportQtab() {
+  const btn = $("qtabExportBtn");
+  if (!state.project || btn.disabled) return;
+  const s = sel.cur;
+  const stems = sourceStems(projWave ? projWave.stem : "");
+  const rate = Number(els.projRate.value) / 100;
+  const params = new URLSearchParams({ stems: stems.join(","), rate: String(rate) });
+  if (s) {
+    params.set("start", String(s.start));
+    params.set("end", String(s.end));
+    params.set("label", s.name || "");
+  }
+  const label = btn.innerHTML;
+  btn.disabled = true;
+  btn.textContent = "Exportando…";
+  banner(els.projectStatus, "Preparando o .qtab para o VstCam (áudio + acordes)...", "busy");
+  try {
+    const res = await fetch(projectUrl(`/export.qtab?${params}`));
+    if (!res.ok) {
+      let detail = `Erro HTTP ${res.status}`;
+      try { detail = (await res.json()).detail || detail; } catch { /* non-JSON body */ }
+      throw new Error(detail);
+    }
+    const blob = await res.blob();
+    const cd = res.headers.get("Content-Disposition") || "";
+    const m = cd.match(/filename\*=UTF-8''([^;]+)/);
+    const a = el("a", { href: URL.createObjectURL(blob), download: m ? decodeURIComponent(m[1]) : "export.qtab" });
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+    hide(els.projectStatus);
+  } catch (err) {
+    banner(els.projectStatus, `Não foi possível exportar para o VstCam: ${err.message}`, "error");
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = label;
+  }
+}
+$("qtabExportBtn").addEventListener("click", exportQtab);
 els.selClearBtn.addEventListener("click", () => {
   if (sel.cur && sel.cur.kind === "draft") discardDraft();
   else setSelection(null);

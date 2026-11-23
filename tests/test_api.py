@@ -339,3 +339,60 @@ def test_new_part_fits_into_the_timeline(tmp_path: Path):
     insert_part_fitted(job, tmp_path, "Solo", 42.0, 45.0)
     verses = sorted((p.start, p.end) for p in job.parts if p.name == "Verso 3")
     assert verses == [(40.0, 42.0), (45.0, 50.0)]
+
+
+
+def test_export_qtab(tmp_path: Path):
+    import zipfile
+
+    client = TestClient(create_app(workspace_root=tmp_path))
+    pid = _create_project(client, _make_wav_bytes(duration_s=3.0))["job_id"]
+    part_id = client.post(f"/api/projects/{pid}/parts", json={"name": "Riff", "start": 0.5, "end": 2.5}).json()["part"]["part_id"]
+
+    # no harmony analysis yet: nothing to show
+    assert client.get(f"/api/projects/{pid}/export.qtab").status_code == 422
+
+    field = [{"degree": d, "function": f} for d, f in enumerate("TSTSDTD", start=1)]
+    chords = [
+        {"start": 0.0, "end": 1.2, "label": "Em", "root": 4, "quality": "min", "bass": None,
+         "numeral": "i", "diatonic": True, "degree": 1},
+        {"start": 1.2, "end": 2.0, "label": "B", "root": 11, "quality": "maj", "bass": None,
+         "numeral": "V", "diatonic": False, "degree": 5},
+        {"start": 2.0, "end": 3.0, "label": "C", "root": 0, "quality": "maj", "bass": None,
+         "numeral": "bVI", "diatonic": True, "degree": 6},
+    ]
+    (tmp_path / pid / "harmony.json").write_text(json.dumps(
+        {"key": {"tonic": 4, "tonic_name": "E", "name": "Mi menor", "mode": "aeolian"},
+         "field": field, "chords": chords}), encoding="utf-8")
+
+    # whole song at full speed
+    res = client.get(f"/api/projects/{pid}/export.qtab")
+    assert res.status_code == 200, res.text
+    assert ".qtab" in res.headers["content-disposition"]
+    z = zipfile.ZipFile(io.BytesIO(res.content))
+    assert set(z.namelist()) == {"manifest.json", "backing.flac", "chords.json", "sections.json", "lyrics.json"}
+    manifest = json.loads(z.read("manifest.json"))
+    assert manifest["format"] == "qtab" and manifest["version"] == 1 and manifest["rate"] == 1.0
+    assert manifest["key"]["name"] == "Mi menor" and manifest["functions"]["T"]["color"] == "#10b981"
+    assert abs(manifest["audio"]["duration"] - 3.0) < 0.05
+    got = json.loads(z.read("chords.json"))
+    assert [(c["label"], c["function"], c["start"], c["end"]) for c in got] == [
+        ("Em", "T", 0.0, 1.2), ("B", "X", 1.2, 2.0), ("C", "T", 2.0, 3.0)]
+    assert json.loads(z.read("sections.json")) == [{"id": part_id, "name": "Riff", "start": 0.5, "end": 2.5}]
+    assert json.loads(z.read("lyrics.json")) == []
+    audio, sr = sf.read(io.BytesIO(z.read("backing.flac")))
+    assert abs(len(audio) / sr - 3.0) < 0.05
+
+    # an excerpt at half speed: times start at 0, are clipped to it and stretched
+    res = client.get(f"/api/projects/{pid}/export.qtab", params={"rate": 0.5, "start": 1.0, "end": 2.0, "label": "Riff"})
+    assert res.status_code == 200, res.text
+    assert "50%25" in res.headers["content-disposition"]
+    z = zipfile.ZipFile(io.BytesIO(res.content))
+    manifest = json.loads(z.read("manifest.json"))
+    assert abs(manifest["audio"]["duration"] - 2.0) < 0.05
+    assert manifest["range"] == {"start": 1.0, "end": 2.0}
+    got = json.loads(z.read("chords.json"))
+    assert [(c["label"], c["start"], c["end"]) for c in got] == [("Em", 0.0, 0.4), ("B", 0.4, 2.0)]
+    assert json.loads(z.read("sections.json"))[0] == {"id": part_id, "name": "Riff", "start": 0.0, "end": 2.0}
+
+    assert client.get(f"/api/projects/{pid}/export.qtab", params={"rate": 3}).status_code == 422
