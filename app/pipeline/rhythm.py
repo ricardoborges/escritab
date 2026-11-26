@@ -132,15 +132,15 @@ def build_pretty_midi(
 
     med_dt = float(np.median(np.diff(clean)))
     # Anchor t=0.0 at tick=0 while keeping every subsequent beat on an exact multiple of `resolution`
+    has_preroll = float(clean[0]) >= 0.002
     points: list[tuple[int, float]] = [(0, 0.0)]
-    if clean[0] >= 0.25 * med_dt:
+    if has_preroll:
         lead_beats = max(1, int(round(clean[0] / med_dt)))
         cur_tick = lead_beats * resolution
         points.append((cur_tick, float(clean[0])))
-        rest = clean[1:]
     else:
         cur_tick = 0
-        rest = clean[1:]
+    rest = clean[1:]
 
     for bt in rest:
         if bt <= points[-1][1] + 0.05:
@@ -164,7 +164,11 @@ def build_pretty_midi(
         t_tick, t_sec = points[i]
         n_tick, n_sec = points[i + 1]
         span_beats = max(1, (n_tick - t_tick) // resolution)
-        us_per_beat = _clamp_tempo_us((n_sec - t_sec) * 1_000_000.0 / span_beats)
+        raw_us = (n_sec - t_sec) * 1_000_000.0 / span_beats
+        if i == 0 and has_preroll:
+            us_per_beat = int(np.clip(round(raw_us), 1_000, 16_777_215))
+        else:
+            us_per_beat = _clamp_tempo_us(raw_us)
         tr.append(mido.MetaMessage("set_tempo", time=t_tick - prev_event_tick, tempo=us_per_beat))
         prev_event_tick = t_tick
 

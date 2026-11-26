@@ -57,6 +57,28 @@ def test_build_pretty_midi_aligns_beats_to_ticks_and_preserves_seconds(tmp_path:
         assert abs(note.start - orig_b) < 0.002
 
 
+def test_build_pretty_midi_preserves_early_first_beat_preroll(tmp_path: Path):
+    cases = [
+        (120.0, [0.08 + i * 0.50 for i in range(5)], "early_120.mid"),
+        (152.0, [0.12 + i * (60.0 / 152.0) for i in range(5)], "early_152.mid"),
+    ]
+    for bpm, beats, fname in cases:
+        pm = rhythm.build_pretty_midi(beats, bpm=bpm, max_time=beats[-1] + 0.5, resolution=480)
+        ins = pretty_midi.Instrument(program=30, name="Guitar")
+        for b in beats:
+            ins.notes.append(pretty_midi.Note(velocity=100, pitch=52, start=b, end=b + 0.15))
+        pm.instruments.append(ins)
+
+        out = tmp_path / fname
+        pm.write(str(out))
+
+        reloaded = pretty_midi.PrettyMIDI(str(out))
+        for orig_b, note in zip(beats, reloaded.instruments[0].notes):
+            tick = reloaded.time_to_tick(note.start)
+            assert tick % 480 == 0
+            assert abs(note.start - orig_b) < 0.002
+
+
 def test_is_triplet_beat_distinguishes_binary_from_triplets():
     assert rhythm.is_triplet_beat([]) is False
     assert rhythm.is_triplet_beat([0.0, 0.5]) is False
