@@ -46,12 +46,15 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def default_name(filename: str) -> str:
+def default_name(filename: str, strip_version: bool = True) -> str:
     stem = Path(filename).stem
     stem = re.sub(r"^input_", "", stem)
     name = re.sub(r"[_]+", " ", stem).strip()
     # "01 - Song", "1. Song", "03) Song": drop the track number ("7 Rings" / "1984" stay)
     name = re.sub(r"^\d{1,3}\s*[-–—.)]+\s*", "", name).strip() or name
+    if strip_version:
+        # "Song v4", "Song - V2", "Song (v1.3)": drop the version tag of the render
+        name = re.sub(r"[\s\-–—]+[(\[]?v\d+(?:\.\d+)*[)\]]?$", "", name, flags=re.IGNORECASE).strip() or name
     return name or "Sem nome"
 
 

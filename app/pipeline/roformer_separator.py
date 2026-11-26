@@ -174,7 +174,7 @@ def separate_vocals_array(mix: np.ndarray, progress=None) -> np.ndarray:
     return out[:, pad:pad + total]
 
 
-def separate_vocals(input_path: Path, vocals_path: Path, instrumental_path: Path) -> None:
+def separate_vocals(input_path: Path, vocals_path: Path, instrumental_path: Path, progress=None) -> None:
     """Write the vocals and the instrumental (mix - vocals) of an audio file, 44.1 kHz stereo."""
     import librosa
     import soundfile as sf
@@ -183,6 +183,6 @@ def separate_vocals(input_path: Path, vocals_path: Path, instrumental_path: Path
     if mix.ndim == 1:
         mix = np.stack([mix, mix])
     mix = mix[:2].astype(np.float32)
-    vocals = separate_vocals_array(mix)
+    vocals = separate_vocals_array(mix, progress=progress)
     sf.write(str(vocals_path), vocals.T, SAMPLE_RATE)
     sf.write(str(instrumental_path), (mix - vocals).T, SAMPLE_RATE)

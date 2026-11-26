@@ -1,8 +1,10 @@
 from __future__ import annotations
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
+from typing import Callable
 import librosa
 import soundfile as sf
 import torch
@@ -10,6 +12,9 @@ import torch
 
 STEM_NAMES_6S = ("guitar", "other", "bass", "drums", "vocals", "piano")
 STEM_NAMES_4S = ("other", "bass", "drums", "vocals")
+_TQDM_PCT = re.compile(r"(\d{1,3})%\|")
+# progress(fraction 0-1, what is running): optional, for callers that show a progress bar
+Progress = Callable[[float, str], None]
 
 
 def _invoke_demucs(
@@ -18,6 +23,7 @@ def _invoke_demucs(
     model_name: str,
     device: str,
     segment: int,
+    progress: Progress | None = None,
 ) -> None:
     cmd = [
         sys.executable,
@@ -33,9 +39,27 @@ def _invoke_demucs(
         str(out_dir),
         str(input_path),
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0:
-        raise RuntimeError(f"Demucs failed ({device}, seg={segment}): {proc.stderr}")
+    if progress is None:
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0:
+            raise RuntimeError(f"Demucs failed ({device}, seg={segment}): {proc.stderr}")
+        return
+    # Demucs draws a tqdm bar on stderr ("  42%|####   | 12.3/29.2"): forward the percentage
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    err = bytearray()
+    line = bytearray()
+    while chunk := proc.stderr.read(256):
+        err += chunk
+        for byte in chunk:
+            if byte in (13, 10):  # CR or LF ends a bar redraw
+                m = _TQDM_PCT.search(line.decode("utf-8", "replace"))
+                if m:
+                    progress(int(m.group(1)) / 100.0, f"Demucs ({device})")
+                line.clear()
+            else:
+                line.append(byte)
+    if proc.wait() != 0:
+        raise RuntimeError(f"Demucs failed ({device}, seg={segment}): {err.decode('utf-8', 'replace')[-4000:]}")
 
 
 def _collect_demucs_outputs(
@@ -69,6 +93,7 @@ def separate_stems(
     job_dir: Path,
     is_isolated_stem: bool = False,
     model_name: str = "htdemucs_6s",
+    progress: Progress | None = None,
 ) -> tuple[dict[str, str], str]:
     job_dir.mkdir(parents=True, exist_ok=True)
 
@@ -82,7 +107,7 @@ def separate_stems(
         return {"guitar": dst_name}, "bypass"
 
     if model_name == "roformer_htdemucs_6s":
-        return _separate_roformer_then_demucs(input_audio_path, job_dir)
+        return _separate_roformer_then_demucs(input_audio_path, job_dir, progress)
 
     from app.pipeline import model_downloads
 
@@ -99,7 +124,10 @@ def separate_stems(
     last_err: Exception | None = None
     for device, segment in attempts:
         try:
-            _invoke_demucs(input_audio_path, demucs_tmp, model_name, device, segment)
+            if progress is None:
+                _invoke_demucs(input_audio_path, demucs_tmp, model_name, device, segment)
+            else:
+                _invoke_demucs(input_audio_path, demucs_tmp, model_name, device, segment, progress=progress)
             if device == "cuda" and torch.cuda.is_available():
                 torch.cuda.empty_cache()
             stems_map = _collect_demucs_outputs(
@@ -115,23 +143,31 @@ def separate_stems(
     raise RuntimeError(f"All stem separation attempts failed: {last_err}")
 
 
-def _separate_roformer_then_demucs(input_audio_path: Path, job_dir: Path) -> tuple[dict[str, str], str]:
+def _separate_roformer_then_demucs(
+    input_audio_path: Path, job_dir: Path, progress: Progress | None = None
+) -> tuple[dict[str, str], str]:
     """BS-RoFormer vocals (far less bleed than Demucs), then htdemucs_6s on the clean instrumental
     for guitar / bass / drums / piano / other. Falls back to plain htdemucs_6s without bs-roformer."""
     from app.pipeline import roformer_separator
 
     if not roformer_separator.is_available():
-        stems, device = separate_stems(input_audio_path, job_dir, model_name="htdemucs_6s")
+        stems, device = separate_stems(input_audio_path, job_dir, model_name="htdemucs_6s", progress=progress)
         return stems, f"{device} (htdemucs_6s; bs-roformer não instalado)"
 
     instrumental = job_dir / "_roformer_instrumental.wav"
     vocals = job_dir / "_roformer_vocals.wav"
     try:
-        roformer_separator.separate_vocals(input_audio_path, vocals, instrumental)
+        if progress is None:
+            roformer_separator.separate_vocals(input_audio_path, vocals, instrumental)
+        else:
+            roformer_separator.separate_vocals(
+                input_audio_path, vocals, instrumental,
+                progress=lambda i, n: progress(i / n, "BS-RoFormer (vocais)"),
+            )
     finally:
         roformer_separator.unload()
     try:
-        stems, device = separate_stems(instrumental, job_dir, model_name="htdemucs_6s")
+        stems, device = separate_stems(instrumental, job_dir, model_name="htdemucs_6s", progress=progress)
     finally:
         instrumental.unlink(missing_ok=True)
     # Demucs' vocals from an instrumental are only residue: the RoFormer vocals replace them

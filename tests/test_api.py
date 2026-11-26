@@ -294,7 +294,14 @@ def test_excerpt_audio_pads_mismatched_stem_lengths_and_normalizes_before_gate(t
 def test_default_name_drops_the_track_number():
     from app.projects import default_name
 
-    assert default_name("01 - Il Sussurro dei Draghi v4.wav") == "Il Sussurro dei Draghi v4"
+    assert default_name("01 - Il Sussurro dei Draghi v4.wav") == "Il Sussurro dei Draghi"
+    assert default_name("01 - Il Sussurro dei Draghi v4.wav", strip_version=False) == "Il Sussurro dei Draghi v4"
+    assert default_name("input_05_-_Unkillable_Dragon_v4.wav") == "Unkillable Dragon"
+    assert default_name("11 - In the Land Where Dragons Roam I v4.wav") == "In the Land Where Dragons Roam I"
+    assert default_name("Song - V2.mp3") == "Song"
+    assert default_name("Song (v1.3).flac") == "Song"
+    assert default_name("Mav4.wav") == "Mav4"  # not a version tag
+    assert default_name("v4.wav") == "v4"
     assert default_name("1. Song.mp3") == "Song"
     assert default_name("7 Rings.mp3") == "7 Rings"
     assert default_name("1984.wav") == "1984"

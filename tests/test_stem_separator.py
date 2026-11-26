@@ -28,7 +28,7 @@ def test_separate_stems_fallback_from_cuda_oom_to_cpu(tmp_path: Path, monkeypatc
 
     calls = []
 
-    def fake_run_demucs(input_path: Path, out_dir: Path, model_name: str, device: str, segment: int):
+    def fake_run_demucs(input_path: Path, out_dir: Path, model_name: str, device: str, segment: int, progress=None):
         calls.append((device, segment))
         if device == "cuda":
             raise RuntimeError("CUDA out of memory")

@@ -85,6 +85,22 @@ $env:ESCRITAB_SOUNDFONTS = "D:\SoundFonts;E:\More SoundFonts"
 uv run python run.py
 ```
 
+### Batch processing (CLI)
+
+`cli.py` imports every song in a folder as a project and runs the chosen pipeline steps. The
+projects show up in the web studio afterwards, with the analysis already cached.
+
+```bash
+uv run python cli.py D:\Music                       # stems + full-song MIDI + harmony
+uv run python cli.py D:\Music -r --steps all --qtab-dir D:\qtabs
+uv run python cli.py D:\Music --dry-run             # just list what would be processed
+```
+
+Steps, in order: `stems`, `multitrack`, `harmony`, `lyrics`, `parts`, `tabs`, `qtab` (or `all`).
+A song that was already imported (same file content) reuses its project, and steps that are already
+done are skipped, so an interrupted run can simply be started again (`--force` redoes them). A
+failed step doesn't stop the batch; a summary is printed at the end. See `python cli.py --help`.
+
 ## Tests
 
 ```bash
@@ -113,4 +129,5 @@ app/
   static/            SPA (HTML/JS/CSS, AlphaTab, MIDI player)
 tests/               pytest tests
 run.py               entry point (uvicorn on 127.0.0.1:8000)
+cli.py               batch processing of a folder (app/batch.py)
 ```
