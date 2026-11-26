@@ -15,6 +15,7 @@ class MidiPlayer {
     this.midi = null;            // ArrayBuffer of the current file
     this.midiUrl = null;
     this.division = 480;
+    this.tempoMap = null;
     this.channels = new Map();   // channel -> track (one track per channel, pretty_midi layout)
     this.routes = new Map();     // channel -> {sf, bank, program}
     this.muted = new Set();      // track indices
@@ -71,6 +72,7 @@ class MidiPlayer {
       const dv = new DataView(this.midi);
       const div = dv.getUint16(12);
       this.division = div & 0x8000 ? 480 : div;   // SMPTE timing never comes out of pretty_midi
+      this.tempoMap = MidiPlayer.parseTempoMap(this.midi, this.division);
       this.total = 0;
     }
     this.channels = new Map(tracks.map((t) => [t.channel, t]));
@@ -188,7 +190,70 @@ class MidiPlayer {
     this.onState();
   }
 
+  static parseTempoMap(buf, division = 480) {
+    const u8 = new Uint8Array(buf);
+    const dv = new DataView(buf);
+    if (u8.length < 22 || dv.getUint32(0) !== 0x4d546864) return null; // "MThd"
+    let pos = 8 + dv.getUint32(4);
+    if (pos + 8 > u8.length || dv.getUint32(pos) !== 0x4d54726b) return null; // "MTrk"
+    const end = Math.min(u8.length, pos + 8 + dv.getUint32(pos + 4));
+    pos += 8;
+
+    const readVlq = () => {
+      let v = 0;
+      while (pos < end) {
+        const b = u8[pos++];
+        v = (v << 7) | (b & 0x7f);
+        if (!(b & 0x80)) break;
+      }
+      return v;
+    };
+
+    const segs = [{ tick: 0, usPerBeat: 500000, sec: 0 }];
+    let tick = 0;
+    let running = 0;
+    while (pos < end) {
+      tick += readVlq();
+      if (pos >= end) break;
+      let status = u8[pos];
+      if (status < 0x80) {
+        status = running;
+      } else {
+        pos++;
+        if (status < 0xf0) running = status;
+      }
+      if (status === 0xff) {
+        const metaType = u8[pos++];
+        const len = readVlq();
+        if (metaType === 0x51 && len === 3 && pos + 3 <= end) {
+          const us = (u8[pos] << 16) | (u8[pos + 1] << 8) | u8[pos + 2];
+          const prev = segs[segs.length - 1];
+          const sec = prev.sec + ((tick - prev.tick) * prev.usPerBeat) / (1e6 * division);
+          if (tick === prev.tick) prev.usPerBeat = us;
+          else segs.push({ tick, usPerBeat: us, sec });
+        }
+        pos += len;
+      } else if (status === 0xf0 || status === 0xf7) {
+        pos += readVlq();
+      } else {
+        const hi = status & 0xf0;
+        pos += hi === 0xc0 || hi === 0xd0 ? 1 : 2;
+      }
+    }
+    return segs;
+  }
+
   seconds(ticks) {
+    if (this.tempoMap && this.tempoMap.length) {
+      let lo = 0, hi = this.tempoMap.length - 1;
+      while (lo < hi) {
+        const mid = (lo + hi + 1) >> 1;
+        if (this.tempoMap[mid].tick <= ticks) lo = mid;
+        else hi = mid - 1;
+      }
+      const s = this.tempoMap[lo];
+      return s.sec + ((ticks - s.tick) * s.usPerBeat) / (1e6 * this.division);
+    }
     return (ticks * 60) / (this.bpm * this.division);
   }
 
