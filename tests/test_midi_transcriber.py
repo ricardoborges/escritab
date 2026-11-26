@@ -159,4 +159,24 @@ def test_monophonic_reduction_keeps_octave_consistency_in_octave_doubled_lines()
     assert [n.pitch for n in out] == [74, 73, 74, 71]
 
 
+def test_postprocess_quantizes_on_warped_beat_grid_and_writes_tempo_map(tmp_path: Path):
+    import pretty_midi
+    from app.pipeline.midi_transcriber import finalize_notes_to_midi
+
+    # Beat 0 at 0.20s, Beat 1 at 0.60s (0.40s beat = 150 BPM -> 1/16 = 0.10s)
+    beats = [0.20, 0.60, 1.00, 1.40]
+    raw = [
+        NoteEvent(pitch=52, start=0.212, end=0.405, velocity=100),  # snaps to 0.20..0.40 (beat 0.0..0.5)
+        NoteEvent(pitch=55, start=0.491, end=0.610, velocity=95),   # snaps to 0.50..0.60 (beat 0.75..1.0)
+    ]
+    params = TranscriptionParams(quantize_grid="1/16", bpm=150.0, suppress_harmonics=False)
+    mid_path = tmp_path / "warped.mid"
+    cleaned, _ = finalize_notes_to_midi(raw, mid_path, params, beats=beats)
+
+    assert [(round(n.start, 3), round(n.end, 3)) for n in cleaned] == [(0.20, 0.40), (0.50, 0.60)]
+    pm = pretty_midi.PrettyMIDI(str(mid_path))
+    _, tempos = pm.get_tempo_changes()
+    assert any(abs(t - 150.0) < 1.0 for t in tempos)
+
+
 

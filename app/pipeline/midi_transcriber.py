@@ -1,9 +1,11 @@
 from __future__ import annotations
 from pathlib import Path
+from typing import Sequence
 import librosa
 import numpy as np
 import pretty_midi
 from app.models import NoteEvent, TUNINGS, TranscriptionParams
+from app.pipeline import rhythm
 
 
 def _tuning_pitch_bounds(tuning_id: str, max_frets: int = 24) -> tuple[int, int]:
@@ -172,6 +174,7 @@ def reduce_to_monophonic(notes: list[NoteEvent], onset_window_s: float = 0.045) 
 def postprocess_notes(
     notes: list[NoteEvent],
     params: TranscriptionParams,
+    beats: Sequence[float] | None = None,
 ) -> tuple[list[NoteEvent], dict[str, int]]:
     preset = TUNINGS.get(params.tuning, TUNINGS["standard_e"])
     num_strings = len(preset.pitches)
@@ -277,17 +280,24 @@ def postprocess_notes(
         polyphony_capped = reduce_to_monophonic(polyphony_capped)
         monophonic_removed = before - len(polyphony_capped)
 
-    # Optional rhythmic quantization
+    # Optional rhythmic quantization (warped onto BeatMap when beats are provided)
     final_notes: list[NoteEvent] = []
     if params.quantize_grid in ("1/16", "1/32") and params.bpm > 0:
         subdiv = 4.0 if params.quantize_grid == "1/16" else 8.0
-        step = (60.0 / params.bpm) / subdiv
+        bmap = rhythm.BeatMap.from_beats(beats, bpm=params.bpm)
+        by_slot: dict[tuple[int, int], NoteEvent] = {}
         for n in polyphony_capped:
-            q_start = round(n.start / step) * step
-            q_end = max(q_start + step, round(n.end / step) * step)
-            final_notes.append(
-                n.model_copy(update={"start": round(q_start, 6), "end": round(q_end, 6)})
-            )
+            b_start = float(bmap.time_to_beat(n.start))
+            b_end = float(bmap.time_to_beat(n.end))
+            slot_on = int(round(b_start * subdiv))
+            slot_off = max(slot_on + 1, int(round(b_end * subdiv)))
+            q_start = max(0.0, float(bmap.beat_to_time(slot_on / subdiv)))
+            q_end = max(q_start + 0.02, float(bmap.beat_to_time(slot_off / subdiv)))
+            cand = n.model_copy(update={"start": round(q_start, 6), "end": round(q_end, 6)})
+            key = (slot_on, cand.pitch)
+            if key not in by_slot or cand.velocity > by_slot[key].velocity:
+                by_slot[key] = cand
+        final_notes = sorted(by_slot.values(), key=lambda x: (x.start, x.pitch))
     else:
         final_notes = polyphony_capped
 
@@ -305,8 +315,10 @@ def notes_to_midi_file(
     notes: list[NoteEvent],
     output_midi_path: Path,
     bpm: float = 120.0,
+    beats: Sequence[float] | None = None,
 ) -> Path:
-    pm = pretty_midi.PrettyMIDI(initial_tempo=float(bpm))
+    max_t = max((float(n.end) for n in notes), default=0.0)
+    pm = rhythm.build_pretty_midi(beats=beats, bpm=float(bpm), max_time=max_t)
     guitar_program = pretty_midi.instrument_name_to_program("Distortion Guitar")
     instrument = pretty_midi.Instrument(program=guitar_program, name="Guitar")
     for n in notes:
@@ -381,11 +393,12 @@ def finalize_notes_to_midi(
     raw_notes: list[NoteEvent],
     output_midi_path: Path,
     params: TranscriptionParams,
+    beats: Sequence[float] | None = None,
 ) -> tuple[list[NoteEvent], dict[str, int | float | str]]:
     """Guitar post-processing (range folding, harmonics, polyphony cap, quantization) + MIDI write."""
-    cleaned_notes, stats = postprocess_notes(raw_notes, params)
+    cleaned_notes, stats = postprocess_notes(raw_notes, params, beats=beats)
     if cleaned_notes:
-        notes_to_midi_file(cleaned_notes, output_midi_path, bpm=params.bpm)
+        notes_to_midi_file(cleaned_notes, output_midi_path, bpm=params.bpm, beats=beats)
         min_p = min(n.pitch for n in cleaned_notes)
         max_p = max(n.pitch for n in cleaned_notes)
         stats["lowest_note"] = str(librosa.midi_to_note(min_p))

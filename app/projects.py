@@ -13,13 +13,14 @@ import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Sequence
 
 import librosa
 import numpy as np
 import soundfile as sf
 
 from app.models import JobMetadata, NoteEvent, Part, TabParams, TranscriptionParams
-from app.pipeline import dettato_transcriber, harmony, instrumental, lead_transcriber, lyrics, scales
+from app.pipeline import dettato_transcriber, harmony, instrumental, lead_transcriber, lyrics, rhythm, scales
 from app.pipeline.audio_cleaner import apply_bandpass_filter, apply_noise_gate, mix_stem_files
 from app.pipeline.exporters import export_ascii_tab, export_gp5, export_musicxml
 from app.pipeline.fretboard import optimize_fretboard
@@ -527,14 +528,23 @@ def clear_outputs(job_dir: Path, part: Part) -> None:
 ONSET_TOLERANCE_S = 0.15
 
 
-def slice_notes(notes: list[NoteEvent], start: float, end: float) -> list[NoteEvent]:
+def slice_notes(
+    notes: list[NoteEvent],
+    start: float,
+    end: float,
+    beats: Sequence[float] | None = None,
+) -> list[NoteEvent]:
     """Notes whose onset falls inside [start, end), clipped at the end and shifted to start at 0.
 
     A note attacked just before the start (a hand-placed edge is never exact) is pulled in at 0."""
+    tol = ONSET_TOLERANCE_S
+    if beats:
+        bmap = rhythm.BeatMap.for_excerpt(beats, bpm=120.0, start=start, end=end)
+        tol = min(ONSET_TOLERANCE_S, 0.35 * bmap.step_s)
     out = [
         n.model_copy(update={"start": max(0.0, n.start - start), "end": min(n.end, end) - start})
         for n in notes
-        if start - ONSET_TOLERANCE_S <= n.start < end and min(n.end, end) - max(n.start, start) > 0.01
+        if start - tol <= n.start < end and min(n.end, end) - max(n.start, start) > 0.01
     ]
     out.sort(key=lambda n: (n.start, n.pitch))
     return out
@@ -740,11 +750,13 @@ def generate_part(
 ) -> str:
     """Excerpt notes -> guitar clean-up -> MIDI -> fretboard -> MusicXML / GP5 / TXT. Returns the ASCII tab."""
     raw, engine = part_raw_notes(job, job_dir, part, tparams)
-    excerpt = slice_notes(raw, part.start, part.end)
+    excerpt = slice_notes(raw, part.start, part.end, beats=job.beats or None)
+    bmap = rhythm.BeatMap.for_excerpt(job.beats, bpm=tab.bpm, start=part.start, end=part.end)
+    local_beats = list(bmap.beats) if job.beats else None
     clear_outputs(job_dir, part)
     pdir = part_dir(job_dir, part.part_id)
     pdir.mkdir(parents=True, exist_ok=True)
-    notes, stats = finalize_notes_to_midi(excerpt, pdir / "guitar.mid", tparams)
+    notes, stats = finalize_notes_to_midi(excerpt, pdir / "guitar.mid", tparams, beats=local_beats)
     if not notes:
         raise PartError(
             "Nenhuma nota de guitarra neste trecho. Confira as faixas/stem escolhidas ou ajuste os limites.",
@@ -753,9 +765,9 @@ def generate_part(
     stats["engine"] = engine
     slices, tab_stats = optimize_fretboard(notes, tab)
     title = f"{job.name} — {part.name}"
-    export_musicxml(slices, tab, pdir / "tab.musicxml", title=title)
-    export_gp5(slices, tab, pdir / "tab.gp5", title=title)
-    txt = export_ascii_tab(slices, tab, pdir / "tab.txt", title=title)
+    export_musicxml(slices, tab, pdir / "tab.musicxml", title=title, beats=local_beats)
+    export_gp5(slices, tab, pdir / "tab.gp5", title=title, beats=local_beats)
+    txt = export_ascii_tab(slices, tab, pdir / "tab.txt", title=title, beats=local_beats)
     part.transcription_params = tparams
     part.tab_params = tab
     part.artifacts = {"midi": "guitar.mid", "musicxml": "tab.musicxml", "gp5": "tab.gp5", "txt": "tab.txt"}

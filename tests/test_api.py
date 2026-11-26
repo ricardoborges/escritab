@@ -239,7 +239,7 @@ def test_multitrack_and_separate_preserve_parts_created_while_running(tmp_path: 
     client = TestClient(create_app(workspace_root=tmp_path))
     pid = _create_project(client, _make_wav_bytes(duration_s=3.0))["job_id"]
 
-    def fake_transcribe_multitrack(audio_path, full_midi, split_guitar_roles=True):
+    def fake_transcribe_multitrack(audio_path, full_midi, split_guitar_roles=True, **kwargs):
         # Simulate the user creating a part while Dettato is running
         res_part = client.post(f"/api/projects/{pid}/parts", json={"name": "Durante Dettato", "start": 0.0, "end": 1.5})
         assert res_part.status_code == 200
@@ -403,3 +403,63 @@ def test_export_qtab(tmp_path: Path):
     assert json.loads(z.read("sections.json"))[0] == {"id": part_id, "name": "Riff", "start": 0.0, "end": 2.0}
 
     assert client.get(f"/api/projects/{pid}/export.qtab", params={"rate": 3}).status_code == 422
+
+
+def test_generate_part_passes_job_beats_into_tab_and_midi(tmp_path: Path, monkeypatch):
+    import xml.etree.ElementTree as ET
+    from types import SimpleNamespace
+    import pretty_midi
+    from app.pipeline import dettato_transcriber
+
+    class FakeModel:
+        device = "cpu"
+
+        def transcribe(self, path):
+            track = SimpleNamespace(
+                name="Electric Guitar",
+                program=26,
+                is_drum=False,
+                notes=np.array([[0.0, 0.4, 40, 100], [0.5, 0.9, 47, 100], [1.0, 1.4, 52, 100]], float),
+            )
+            return SimpleNamespace(
+                tracks=[track],
+                summary=lambda: {"tracks": [{"name": track.name, "notes": len(track.notes)}]},
+            )
+
+    model = FakeModel()
+    monkeypatch.setattr(dettato_transcriber, "is_available", lambda: True)
+    monkeypatch.setattr(dettato_transcriber, "_get_model", lambda: model)
+    monkeypatch.setattr(dettato_transcriber, "_model", model)
+
+    client = TestClient(create_app(workspace_root=tmp_path))
+    res = client.post(
+        "/api/projects",
+        files={"file": ("song.wav", _make_wav_bytes(duration_s=2.5), "audio/wav")},
+        data={"is_isolated_stem": "false", "mode": "dettato"},
+    )
+    pid = res.json()["job_id"]
+
+    # Inject known beats starting at 0.25s with 150 BPM spacing (0.40s)
+    job_path = tmp_path / pid / "job.json"
+    meta = json.loads(job_path.read_text(encoding="utf-8"))
+    meta["detected_bpm"] = 150.0
+    meta["beats"] = [0.25, 0.65, 1.05, 1.45, 1.85, 2.25]
+    job_path.write_text(json.dumps(meta), encoding="utf-8")
+
+    assert client.post(f"/api/projects/{pid}/multitrack").status_code == 200
+    part = client.post(f"/api/projects/{pid}/parts", json={"name": "Intro", "start": 0.0, "end": 2.0}).json()["part"]
+    gen = client.post(
+        f"/api/projects/{pid}/parts/{part['part_id']}/generate",
+        json={"transcription": {"source": "multitrack", "bpm": 150.0}, "tab": {"bpm": 150.0}},
+    )
+    assert gen.status_code == 200, gen.text
+    xml_bytes = client.get(f"/api/projects/{pid}/parts/{part['part_id']}/files/tab.musicxml").content
+    root = ET.fromstring(xml_bytes)
+    assert root.findtext(".//attributes/divisions") == "24"
+    assert root.find(".//measure[@implicit='yes']") is not None
+
+    midi_bytes = client.get(f"/api/projects/{pid}/parts/{part['part_id']}/files/guitar.mid").content
+    pm = pretty_midi.PrettyMIDI(io.BytesIO(midi_bytes))
+    _, tempos = pm.get_tempo_changes()
+    assert any(abs(t - 150.0) < 1.0 for t in tempos)
+    assert len(tempos) >= 2

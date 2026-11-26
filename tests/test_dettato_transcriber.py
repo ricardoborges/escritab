@@ -229,3 +229,15 @@ def test_multitrack_splits_guitar_into_base_and_solo(tmp_path: Path, monkeypatch
     tracks, _ = dettato_transcriber.transcribe_multitrack(
         tmp_path / "in.wav", tmp_path / "full2.mid", split_guitar_roles=False)
     assert [t.name for t in tracks] == ["electric guitar", "violin"]
+
+
+def test_multitrack_encodes_project_bpm_and_beat_tempo_map(tmp_path: Path, fake_dettato):
+    beats = [0.25, 0.65, 1.05, 1.45, 1.85]  # 150 BPM (0.40s per beat) after 0.25s lead-in
+    out_mid = tmp_path / "full_150.mid"
+    dettato_transcriber.transcribe_multitrack(
+        tmp_path / "in.wav", out_mid, bpm=150.0, beats=beats
+    )
+    pm = pretty_midi.PrettyMIDI(str(out_mid))
+    _, tempos = pm.get_tempo_changes()
+    assert any(abs(t - 150.0) < 1.0 for t in tempos)
+    assert not np.allclose(tempos, 120.0)

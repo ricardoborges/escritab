@@ -231,7 +231,11 @@ def create_app(workspace_root: Path | str = Path("workspace/jobs")) -> FastAPI:
         full_midi = job_dir / "full_song.mid"
         try:
             tracks, info = dettato_transcriber.transcribe_multitrack(
-                job_dir / job.input_path, full_midi, split_guitar_roles=req.split_guitar_roles
+                job_dir / job.input_path,
+                full_midi,
+                split_guitar_roles=req.split_guitar_roles,
+                bpm=job.detected_bpm,
+                beats=job.beats or None,
             )
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"Falha na transcrição multi-instrumento: {exc}") from exc

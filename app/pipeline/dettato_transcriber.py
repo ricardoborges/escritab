@@ -14,11 +14,12 @@ import importlib.util
 import json
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import pretty_midi
 
 from app.models import MidiTrackInfo, NoteEvent
+from app.pipeline import rhythm
 
 GUITAR_PROGRAMS = frozenset(range(24, 32))  # GM 25-32: acoustic / electric / overdriven / distortion guitars
 
@@ -91,8 +92,14 @@ def _role_parts(t: Any, split_roles: bool) -> list[tuple[str, int, bool, Any, st
     return [(t.name, program, False, notes, role)]
 
 
-def _write_midi(parts: list[tuple[str, int, bool, Any, str | None]], path: Path) -> None:
-    pm = pretty_midi.PrettyMIDI(initial_tempo=120.0)
+def _write_midi(
+    parts: list[tuple[str, int, bool, Any, str | None]],
+    path: Path,
+    bpm: float = 120.0,
+    beats: Sequence[float] | None = None,
+) -> None:
+    max_t = max((float(notes[:, 1].max()) for _, _, _, notes, _ in parts if len(notes)), default=0.0)
+    pm = rhythm.build_pretty_midi(beats=beats, bpm=bpm, max_time=max_t)
     for name, program, is_drum, notes, _ in parts:
         ins = pretty_midi.Instrument(program=0 if is_drum else program, is_drum=is_drum, name=name)
         for on, off, pitch, vel in notes:
@@ -108,6 +115,8 @@ def transcribe_multitrack(
     audio_path: Path,
     output_midi_path: Path,
     split_guitar_roles: bool = True,
+    bpm: float = 120.0,
+    beats: Sequence[float] | None = None,
 ) -> tuple[list[MidiTrackInfo], dict[str, Any]]:
     """Transcribe a whole song. Writes a multi-track MIDI (and a JSON summary next to it).
 
@@ -115,7 +124,7 @@ def transcribe_multitrack(
     (lead) tracks. Track ``index`` matches the instrument order inside the written MIDI file."""
     result = _run(audio_path)
     parts = [part for t in result.tracks for part in _role_parts(t, split_guitar_roles)]
-    _write_midi(parts, output_midi_path)
+    _write_midi(parts, output_midi_path, bpm=bpm, beats=beats)
 
     tracks: list[MidiTrackInfo] = []
     for idx, (name, program, is_drum, notes, role) in enumerate(parts):

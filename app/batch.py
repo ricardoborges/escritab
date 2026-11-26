@@ -283,7 +283,11 @@ def _step_multitrack(job, job_dir: Path, opts: Options) -> str:
         raise RuntimeError("Dettato não está instalado (uv sync).")
     full_midi = job_dir / "full_song.mid"
     tracks, info = dettato_transcriber.transcribe_multitrack(
-        job_dir / job.input_path, full_midi, split_guitar_roles=opts.split_guitar_roles
+        job_dir / job.input_path,
+        full_midi,
+        split_guitar_roles=opts.split_guitar_roles,
+        bpm=job.detected_bpm,
+        beats=job.beats or None,
     )
     job.multitrack = tracks
     job.artifacts["multitrack_midi"] = full_midi.name
