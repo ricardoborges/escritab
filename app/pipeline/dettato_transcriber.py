@@ -199,3 +199,48 @@ def transcribe_stem_notes(audio_path: Path) -> list[NoteEvent]:
             )
     notes.sort(key=lambda x: (x.start, x.pitch))
     return notes
+
+
+_NOTES_CACHE: dict[str, tuple[tuple[int, int, int], dict[str, Any]]] = {}
+
+
+def multitrack_notes_payload(
+    midi_path: Path,
+    tracks: list[MidiTrackInfo],
+    duration: float = 0.0,
+) -> dict[str, Any]:
+    """Compact per-track note arrays [[start, end, pitch, velocity], ...] for the browser Piano Roll."""
+    st = midi_path.stat()
+    sig = (st.st_mtime_ns, st.st_size, len(tracks))
+    key = str(midi_path)
+    cached = _NOTES_CACHE.get(key)
+    if cached and cached[0] == sig:
+        data = cached[1]
+        if duration > data["duration"]:
+            return {**data, "duration": round(float(duration), 4)}
+        return data
+
+    pm = pretty_midi.PrettyMIDI(str(midi_path))
+    out_tracks: list[dict[str, Any]] = []
+    for info in tracks:
+        inst = pm.instruments[info.index] if 0 <= info.index < len(pm.instruments) else None
+        raw_notes = inst.notes if inst is not None else []
+        ordered = sorted(raw_notes, key=lambda n: (n.start, n.pitch))
+        serialized = [
+            [round(float(n.start), 4), round(float(n.end), 4), int(n.pitch), int(n.velocity)]
+            for n in ordered
+        ]
+        out_tracks.append({
+            "index": info.index,
+            "name": info.name,
+            "program": info.program,
+            "is_drum": info.is_drum,
+            "is_guitar": info.is_guitar,
+            "role": info.role,
+            "notes": serialized,
+        })
+
+    total_dur = round(max(float(duration or 0.0), float(pm.get_end_time())), 4)
+    payload = {"duration": total_dur, "tracks": out_tracks}
+    _NOTES_CACHE[key] = (sig, payload)
+    return payload

@@ -250,6 +250,16 @@ def create_app(workspace_root: Path | str = Path("workspace/jobs")) -> FastAPI:
             "info": info,
         }
 
+    @app.get("/api/projects/{project_id}/multitrack/notes")
+    def get_multitrack_notes(project_id: str):
+        """Per-track note list of the full-song MIDI for the browser Piano Roll."""
+        job, job_dir = load(project_id)
+        midi_name = job.artifacts.get("multitrack_midi", "full_song.mid")
+        full_midi = job_dir / midi_name
+        if not job.multitrack or not full_midi.is_file():
+            raise HTTPException(status_code=404, detail="MIDI completo ainda não foi gerado.")
+        return dettato_transcriber.multitrack_notes_payload(full_midi, job.multitrack, duration=job.duration)
+
     @app.get("/api/projects/{project_id}/harmony")
     def get_harmony(project_id: str):
         """The cached harmony analysis, or null when it has not been run yet."""
