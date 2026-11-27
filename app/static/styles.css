@@ -1163,6 +1163,187 @@ details.card:not([open]) {
   grid-template-columns: 1fr auto auto;
   cursor: default;
 }
+.mixer-row .track-name {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+.track-color-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.28);
+}
+
+/* ---------- multi-instrument MIDI Piano Roll ---------- */
+.piano-roll-box {
+  margin-top: 1rem;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-input);
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+.pr-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.65rem;
+}
+.pr-head .small {
+  display: block;
+  margin-top: 0.15rem;
+}
+.pr-quick-picks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+.pr-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+.pr-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.28rem 0.7rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  opacity: 0.56;
+  transition: opacity 0.12s, border-color 0.12s, background 0.12s, box-shadow 0.12s, color 0.12s;
+}
+.pr-chip:hover {
+  opacity: 0.92;
+  border-color: var(--tc, var(--primary));
+}
+.pr-chip.active {
+  opacity: 1;
+  color: var(--text-main);
+  border-color: var(--tc, var(--primary));
+  background: color-mix(in srgb, var(--tc, var(--primary)) 18%, var(--bg-card));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--tc, var(--primary)) 40%, transparent);
+}
+.pr-chip-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--tc, var(--primary));
+  flex: 0 0 auto;
+}
+.pr-chip-role {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  opacity: 0.8;
+}
+.pr-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.6rem;
+}
+.pr-zoom-btns {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+}
+.pr-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.9rem;
+}
+.pr-now-bar {
+  min-height: 2.25rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(22, 27, 34, 0.78);
+}
+.pr-now-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.38rem;
+  padding: 0.16rem 0.55rem;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--tc, var(--primary)) 55%, var(--border));
+  background: color-mix(in srgb, var(--tc, var(--primary)) 14%, var(--bg-dark));
+  font-size: 0.8rem;
+  line-height: 1.3;
+  white-space: nowrap;
+}
+.pr-now-pill.is-pinned {
+  border-style: dashed;
+  box-shadow: 0 0 0 1px rgba(254, 240, 138, 0.4);
+}
+.pr-pill-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--tc, var(--primary));
+  flex: 0 0 auto;
+}
+.pr-pill-pos {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+.pr-canvas-wrap {
+  position: relative;
+  height: 390px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: #0b0e14;
+}
+#pianoRollCanvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.pr-tooltip {
+  position: fixed;
+  z-index: 60;
+  pointer-events: none;
+  max-width: 280px;
+  padding: 0.45rem 0.65rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: rgba(13, 17, 23, 0.96);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+  font-size: 0.78rem;
+  line-height: 1.4;
+  color: var(--text-main);
+}
+.pr-tt-head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-weight: 700;
+  margin-bottom: 0.15rem;
+}
+.pr-tt-pos {
+  color: var(--text-muted);
+  margin-top: 0.15rem;
+}
 
 /* ---------- lyrics + chord sheet ---------- */
 .lyrics-editor,

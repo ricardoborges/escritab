@@ -496,6 +496,40 @@
             </div>
             <div id="mpStatus" class="status-banner hidden"></div>
           </div>
+          <div class="piano-roll-box hidden" id="pianoRollBox">
+            <div class="pr-head">
+              <div>
+                <strong>Piano Roll — aprenda lendo as notas</strong>
+                <span class="muted small">Clique nos instrumentos para combinar cores, ou clique numa nota/tecla para ouvi-la isolada.</span>
+              </div>
+              <div class="pr-quick-picks" role="group" aria-label="Seleção rápida de instrumentos">
+                <button type="button" class="btn-outline btn-small" data-pr-pick="melodic">Melódicas</button>
+                <button type="button" class="btn-outline btn-small" data-pr-pick="guitar">Guitarras / Solos</button>
+                <button type="button" class="btn-outline btn-small" data-pr-pick="none">Limpar</button>
+              </div>
+            </div>
+            <div class="pr-chips" id="prTrackChips" role="group" aria-label="Instrumentos visíveis no Piano Roll"></div>
+            <div class="pr-toolbar">
+              <div class="pr-zoom-btns">
+                <button type="button" class="btn-outline btn-small" id="prZoomOutBtn" title="Diminuir zoom horizontal">&minus;</button>
+                <button type="button" class="btn-outline btn-small" id="prZoomInBtn" title="Aumentar zoom horizontal">+</button>
+                <button type="button" class="btn-outline btn-small" id="prFitPartBtn" title="Enquadrar a parte selecionada no player">Trecho</button>
+                <button type="button" class="btn-outline btn-small" id="prFitAllBtn" title="Ver a música inteira">Tudo</button>
+              </div>
+              <div class="pr-toggles">
+                <label class="checkbox-row small"><input type="checkbox" id="prFollowCheck" checked /><span>Seguir agulha</span></label>
+                <label class="checkbox-row small"><input type="checkbox" id="prScaleCheck" checked /><span>Destacar notas do tom</span></label>
+              </div>
+            </div>
+            <div class="pr-now-bar" id="prNowBar" aria-live="polite">
+              <span class="muted small">Dê play (no áudio acima ou nos instrumentos virtuais) ou clique em qualquer nota para ler os detalhes.</span>
+            </div>
+            <div class="pr-canvas-wrap" id="prCanvasWrap">
+              <canvas id="pianoRollCanvas" aria-label="Piano Roll multi-instrumento da música"></canvas>
+              <div class="pr-tooltip hidden" id="prTooltip" role="tooltip"></div>
+            </div>
+            <div id="prStatus" class="status-banner hidden"></div>
+          </div>
         </div>
       </div>
     </section>
@@ -912,6 +946,7 @@
   </dialog>
 
   <script src="/static/midi_player.js"></script>
+  <script src="/static/piano_roll.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

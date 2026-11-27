@@ -315,3 +315,21 @@ def test_piano_roll_instance_and_interactions_in_node():
     assert out["tStartAfterDrag"] > 0
     assert out["activesCount"] >= 2
     assert out["listenersAfterDestroy"] == 0
+
+
+def test_piano_roll_html_elements_and_static_script_served(tmp_path: Path):
+    import re
+
+    client = TestClient(create_app(workspace_root=tmp_path))
+    html = client.get("/").text
+    assert "/static/piano_roll.js" in html
+    for elem_id in ("pianoRollBox", "prTrackChips", "prNowBar", "pianoRollCanvas", "prTooltip"):
+        assert f'id="{elem_id}"' in html, f"missing #{elem_id} in index.html"
+
+    ids = re.findall(r'\bid="([^"]+)"', html)
+    duplicates = {x for x in ids if ids.count(x) > 1}
+    assert not duplicates, f"Duplicate HTML IDs: {duplicates}"
+
+    js_res = client.get("/static/piano_roll.js")
+    assert js_res.status_code == 200
+    assert "class PianoRoll" in js_res.text

@@ -3,7 +3,7 @@
 //   #/p/<project>               project: waveform, mark and name the parts, analysis (Dettato / Demucs)
 //   #/p/<project>/part/<part>   part: practise the excerpt (loop, slower) and get its tab
 
-/* global WaveSurfer, alphaTab, MidiPlayer */
+/* global WaveSurfer, alphaTab, MidiPlayer, PianoRoll */
 
 const ROLE_TAGS = {
   rhythm: "base",
@@ -896,6 +896,7 @@ function stopAllAudio() {
   destroyWave(partWave);
   projWave = partWave = null;
   if (typeof mpReset === "function") mpReset();
+  if (typeof prReset === "function") prReset();
   if (scaleAudio) {
     try {
       scaleAudio.close();
@@ -1214,6 +1215,7 @@ async function renderProjectView() {
     navPlayhead(t);
     updateSheet(t);
     lyricOverlayNow(t);
+    if (!prIsMidiPlaying()) prUpdateTime(t, w.ws.isPlaying());
   };
   $("projTimeTotal").textContent = fmtClock(p.duration);
   $("projBpmLcd").textContent = p.detected_bpm ? String(Math.round(p.detected_bpm * 10) / 10) : "–";
@@ -1224,8 +1226,14 @@ async function renderProjectView() {
     $("sheetPlayBtn").innerHTML = on ? "&#10074;&#10074; Pause" : "&#9654; Play";
   };
   playing(false);
-  w.ws.on("play", () => playing(true));
-  w.ws.on("pause", () => playing(false));
+  w.ws.on("play", () => {
+    playing(true);
+    if (!prIsMidiPlaying()) prUpdateTime(w.ws.getCurrentTime(), true);
+  });
+  w.ws.on("pause", () => {
+    playing(false);
+    if (!prIsMidiPlaying()) prUpdateTime(w.ws.getCurrentTime(), false);
+  });
   for (const ev of ["scroll", "zoom", "redraw", "redrawcomplete"]) w.ws.on(ev, () => {
     syncChordLane(CU.project);
     syncPartLane();
@@ -1238,6 +1246,7 @@ async function renderProjectView() {
     navPlayhead(t);
     updateSheet(t);
     lyricOverlayNow(t);
+    if (!prIsMidiPlaying()) prUpdateTime(t, w.ws.isPlaying());
   });
   // a click on the waveform outside the selected section deselects it (a new part being drawn stays)
   w.onInteraction = (t) => {
@@ -1386,6 +1395,7 @@ function drawPartRegions() {
     });
   }
   renderPartLane();
+  prSyncParts();
 }
 
 /** Clickable buttons for the parts, between the waveform and the chord lane, aligned with the song time. */
@@ -1923,6 +1933,10 @@ function openTab(name, remember = true) {
     b.tabIndex = on ? 0 : -1;
   }
   for (const panel of document.querySelectorAll("[data-tab-panel]")) show(panel, panel.dataset.tabPanel === name);
+  if (name === "analysis" && PR.instance) {
+    PR.instance.resize();
+    requestAnimationFrame(() => PR.instance && PR.instance.resize());
+  }
   if (remember) {
     try {
       localStorage.setItem(tabStorageKey(), name);
@@ -2008,6 +2022,7 @@ function setSelection(s) {
   styleSelection();
   renderSelectionBar();
   navUpdate();
+  prSyncSelection();
 }
 
 /** The waveform loops only when a section is selected AND "Repetir trecho" is on. */
@@ -2324,6 +2339,7 @@ function leavePartEdit(restore) {
   hide(peEls.panel);
   if (projWave && !PE.disableDrag) PE.disableDrag = projWave.regions.enableDragSelection({ color: DRAFT_COLOR });
   renderPartLane();
+  prSyncParts();
 }
 
 function cancelPartEdit() {
@@ -2914,9 +2930,18 @@ function renderMixer() {
         dataset: { track: String(t.index), kind },
       }, label));
     }
-    els.multitrackTracks.append(el("div", { class: "track-row mixer-row" + (t.is_drum ? " is-drum" : "") }, trackLabel(t), trackMeta(t), ms));
+    const label = trackLabel(t);
+    if (typeof PianoRoll !== "undefined") {
+      label.prepend(el("span", {
+        class: "track-color-dot",
+        style: `background:${PianoRoll.trackColor(t.index)}`,
+        "aria-hidden": "true",
+      }));
+    }
+    els.multitrackTracks.append(el("div", { class: "track-row mixer-row" + (t.is_drum ? " is-drum" : "") }, label, trackMeta(t), ms));
   }
   mpLoadSong();
+  prLoadNotes();
 }
 
 async function runMultitrack() {
@@ -2932,6 +2957,7 @@ async function runMultitrack() {
     const data = await postJson(`/api/projects/${projectId}/multitrack`, { split_guitar_roles: els.splitRolesCheck.checked });
     if (state.project && state.project.job_id === projectId) {
       state.project = { ...data.job, parts: state.project.parts };
+      PR.sig = "";
       renderAnalysis();
     }
     const noGuitar = data.default_tab_tracks.length === 0 ? " Nenhuma faixa foi identificada como guitarra: escolha as faixas em cada parte." : "";
@@ -3086,6 +3112,7 @@ function renderHarmony() {
       ? "Descobre o tom, o campo harmônico e os acordes da música."
       : "Descobre o tom, o campo harmônico e os acordes. Fica mais preciso depois de separar as stems (na aba \"MIDI\").";
     renderChordUIs();
+    prSyncHarmony();
     return;
   }
   const src = h.used_midi ? `${h.source} + MIDI Dettato` : h.source;
@@ -3098,6 +3125,7 @@ function renderHarmony() {
   renderOutside(h);
   renderHarmonyParts();
   renderChordUIs();
+  prSyncHarmony();
 }
 
 function renderKey(h) {
@@ -4506,6 +4534,67 @@ function playPitches(pitches, step = 0.26) {
   });
 }
 
+function playSinglePitch(pitch, velocity = 96, durationSec = 0.45) {
+  scaleAudio = scaleAudio || new AudioContext();
+  const ctx = scaleAudio;
+  if (ctx.state === "suspended") ctx.resume();
+  const t = ctx.currentTime + 0.01;
+  const dur = Math.max(0.14, Math.min(2.0, Number(durationSec) || 0.45));
+  const amp = 0.06 + 0.2 * (Math.max(1, Math.min(127, Number(velocity) || 96)) / 127);
+  const osc = ctx.createOscillator();
+  const filt = ctx.createBiquadFilter();
+  const gain = ctx.createGain();
+  osc.type = "sawtooth";
+  osc.frequency.value = 440 * 2 ** ((pitch - 69) / 12);
+  filt.type = "lowpass";
+  filt.frequency.setValueAtTime(3400, t);
+  filt.frequency.exponentialRampToValueAtTime(650, t + Math.min(0.6, dur));
+  gain.gain.setValueAtTime(0.0001, t);
+  gain.gain.exponentialRampToValueAtTime(amp, t + 0.008);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t + dur + 0.06);
+  osc.connect(filt).connect(gain).connect(ctx.destination);
+  osc.start(t);
+  osc.stop(t + dur + 0.08);
+}
+
+function playDrumBurst(pitch, velocity = 96) {
+  scaleAudio = scaleAudio || new AudioContext();
+  const ctx = scaleAudio;
+  if (ctx.state === "suspended") ctx.resume();
+  const t = ctx.currentTime + 0.005;
+  const amp = 0.08 + 0.24 * (Math.max(1, Math.min(127, Number(velocity) || 96)) / 127);
+  const p = Math.round(Number(pitch) || 38);
+  if (p === 35 || p === 36) {
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(135, t);
+    osc.frequency.exponentialRampToValueAtTime(42, t + 0.12);
+    gain.gain.setValueAtTime(amp, t);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.16);
+    osc.connect(gain).connect(ctx.destination);
+    osc.start(t);
+    osc.stop(t + 0.17);
+    return;
+  }
+  const dur = p === 46 || p === 49 || p === 51 || p === 52 || p === 55 || p === 57 || p === 59 ? 0.22 : 0.1;
+  const len = Math.max(1, Math.floor(ctx.sampleRate * dur));
+  const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  const filt = ctx.createBiquadFilter();
+  filt.type = p === 38 || p === 40 || p === 39 ? "bandpass" : "highpass";
+  filt.frequency.setValueAtTime(p === 38 || p === 40 || p === 39 ? 1800 : 5200, t);
+  const gain = ctx.createGain();
+  gain.gain.setValueAtTime(amp * 0.75, t);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  src.connect(filt).connect(gain).connect(ctx.destination);
+  src.start(t);
+  src.stop(t + dur + 0.01);
+}
+
 S.playBtn.addEventListener("click", () => {
   const s = selectedScale();
   if (!s) return;
@@ -5347,6 +5436,7 @@ function mpReset() {
   if (sound.player) sound.player.stop();
   hide(mpEls.status);
   mpEls.box.classList.add("hidden");
+  if (typeof prReset === "function") prReset();
 }
 
 async function mpLoadSong() {
@@ -5426,6 +5516,14 @@ function mpRender() {
     const i = Number(b.dataset.track);
     b.classList.toggle("active", b.dataset.kind === "mute" ? p.muted.has(i) : p.soloed.has(i));
   });
+  if (p.playing) {
+    prStartSync();
+  } else {
+    prStopSync();
+    if (PR.instance && !(projWave && projWave.ws && projWave.ws.isPlaying())) {
+      prUpdateTime(p.currentSeconds(), false);
+    }
+  }
 }
 
 mpEls.play.addEventListener("click", async () => {
@@ -5484,6 +5582,380 @@ mpEls.tabFont.addEventListener("change", () => {
   savePrefs();
   syncTabFont();
 });
+
+// ---------- multi-instrument MIDI Piano Roll ----------
+
+const prEls = {
+  box: $("pianoRollBox"),
+  chips: $("prTrackChips"),
+  zoomOut: $("prZoomOutBtn"),
+  zoomIn: $("prZoomInBtn"),
+  fitPart: $("prFitPartBtn"),
+  fitAll: $("prFitAllBtn"),
+  follow: $("prFollowCheck"),
+  scale: $("prScaleCheck"),
+  now: $("prNowBar"),
+  wrap: $("prCanvasWrap"),
+  canvas: $("pianoRollCanvas"),
+  tooltip: $("prTooltip"),
+  status: $("prStatus"),
+};
+
+const PR = {
+  instance: null,
+  projectId: null,
+  sig: "",
+  rafId: null,
+  tracks: [],
+  duration: 0,
+  selected: new Set(),
+  activeNotes: [],
+  pinnedNote: null,
+};
+
+function prIsMidiPlaying() {
+  return !!(sound.player && sound.player.playing);
+}
+
+function prStopSync() {
+  if (PR.rafId != null) {
+    cancelAnimationFrame(PR.rafId);
+    PR.rafId = null;
+  }
+}
+
+function prStartSync() {
+  if (PR.rafId != null) return;
+  const step = () => {
+    PR.rafId = null;
+    if (!PR.instance || !prIsMidiPlaying()) return;
+    prUpdateTime(sound.player.currentSeconds(), true);
+    PR.rafId = requestAnimationFrame(step);
+  };
+  PR.rafId = requestAnimationFrame(step);
+}
+
+function prUpdateTime(sec, isPlaying) {
+  if (!PR.instance) return;
+  PR.instance.setTime(sec, Boolean(isPlaying));
+}
+
+function prTuningInfo() {
+  const parts = (state.project && state.project.parts) || [];
+  const selPart = sel.cur && sel.cur.partId ? parts.find((p) => p.part_id === sel.cur.partId) : null;
+  const other = parts.find((p) => p.tab_params && p.tab_params.tuning);
+  const tuningId = (selPart && selPart.tab_params && selPart.tab_params.tuning)
+    || (other && other.tab_params.tuning)
+    || (els.tuningSelect && els.tuningSelect.value)
+    || "standard_e";
+  const found = (state.tunings || []).find((t) => t.id === tuningId);
+  const pitches = found && Array.isArray(found.pitches) && found.pitches.length ? found.pitches : [40, 45, 50, 55, 59, 64];
+  const maxFrets = (selPart && selPart.tab_params && selPart.tab_params.max_frets)
+    || Number(els.maxFretsInput && els.maxFretsInput.value)
+    || 24;
+  return { pitches, maxFrets };
+}
+
+function prDefaultSelected(tracks) {
+  const hasNotes = (t) => (Array.isArray(t.notes) ? t.notes.length : Number(t.note_count) || 0) > 0;
+  const melodic = tracks.filter((t) => !t.is_drum && hasNotes(t)).map((t) => t.index);
+  const fallback = tracks.filter(hasNotes).map((t) => t.index);
+  return new Set(melodic.length ? melodic : fallback);
+}
+
+function prMappedParts() {
+  const parts = (state.project && state.project.parts) || [];
+  return parts.map((p) => ({ ...p, ...peRange(p), name: PE.active ? peName(p.part_id) : p.name }));
+}
+
+function prSyncParts() {
+  if (!PR.instance) return;
+  PR.instance.setParts(prMappedParts());
+}
+
+function prSyncHarmony() {
+  if (!PR.instance) return;
+  PR.instance.setHarmony(harmonyIsCurrent() ? H.data : null);
+}
+
+function prSyncSelection() {
+  if (prEls.fitPart) prEls.fitPart.disabled = !sel.cur;
+  if (!PR.instance) return;
+  PR.instance.setSelectedPart(sel.cur && sel.cur.partId ? sel.cur.partId : null);
+  const ti = prTuningInfo();
+  PR.instance.setTuning(ti.pitches, ti.maxFrets);
+  prRenderNowBar();
+}
+
+function prFormatNoteDetails(note) {
+  const useFlats = Boolean(PR.instance && PR.instance.useFlats);
+  const lbl = PianoRoll.noteLabel(note.pitch, useFlats, Boolean(note.isDrum));
+  const ti = prTuningInfo();
+  const positions = note.isDrum ? [] : PianoRoll.guitarPositions(note.pitch, ti.pitches, ti.maxFrets);
+  const posLabels = positions.map((p) => `${p.string}ª c.${p.fret}`);
+  return { lbl, posLabels };
+}
+
+function prRenderNowBar() {
+  if (!prEls.now) return;
+  prEls.now.innerHTML = "";
+  const list = PR.activeNotes && PR.activeNotes.length
+    ? PR.activeNotes
+    : PR.pinnedNote
+      ? [PR.pinnedNote]
+      : [];
+  if (!list.length || typeof PianoRoll === "undefined") {
+    prEls.now.append(el("span", { class: "muted small" },
+      "Dê play (no áudio acima ou nos instrumentos virtuais) ou clique em qualquer nota para ler os detalhes."));
+    return;
+  }
+  const isPinned = !(PR.activeNotes && PR.activeNotes.length) && !!PR.pinnedNote;
+  const maxShow = 10;
+  list.slice(0, maxShow).forEach((n) => {
+    const color = n.color || PianoRoll.trackColor(n.trackIndex);
+    const { lbl, posLabels } = prFormatNoteDetails(n);
+    const detail = posLabels.length ? `${lbl.pt} · ${posLabels[0]}` : lbl.pt;
+    const pill = el("span", {
+      class: "pr-now-pill" + (isPinned ? " is-pinned" : ""),
+      style: `--tc:${color}`,
+      title: `${n.trackName || ""} · ${lbl.name} (${detail})${posLabels.length > 1 ? ` · Outras: ${posLabels.slice(1).join(", ")}` : ""}`,
+    },
+      el("span", { class: "pr-pill-dot", "aria-hidden": "true" }),
+      el("strong", {}, lbl.name),
+      el("span", { class: "pr-pill-pos" }, `(${detail})`));
+    prEls.now.append(pill);
+  });
+  if (list.length > maxShow) {
+    prEls.now.append(el("span", { class: "muted small" }, `+${list.length - maxShow}`));
+  }
+}
+
+function prRenderTooltip(note, clientX, clientY) {
+  if (!prEls.tooltip) return;
+  if (!note || typeof PianoRoll === "undefined") {
+    hide(prEls.tooltip);
+    return;
+  }
+  const color = note.color || PianoRoll.trackColor(note.trackIndex);
+  const { lbl, posLabels } = prFormatNoteDetails(note);
+  prEls.tooltip.innerHTML = "";
+  prEls.tooltip.append(
+    el("div", { class: "pr-tt-head" },
+      el("span", { class: "pr-pill-dot", style: `background:${color}`, "aria-hidden": "true" }),
+      el("span", {}, note.trackName || `Faixa ${(note.trackIndex ?? 0) + 1}`)),
+    el("div", {}, el("strong", {}, lbl.name), ` (${lbl.pt}) · vel ${Math.round(note.velocity ?? 96)}`),
+    el("div", { class: "muted" }, fmtRange(note.start, note.end)));
+  if (posLabels.length) {
+    prEls.tooltip.append(el("div", { class: "pr-tt-pos" }, `Braço: ${posLabels.join(" · ")}`));
+  }
+  prEls.tooltip.classList.remove("hidden");
+  const pad = 12;
+  const tw = prEls.tooltip.offsetWidth || 200;
+  const th = prEls.tooltip.offsetHeight || 80;
+  const x = Math.min(window.innerWidth - tw - pad, Math.max(pad, clientX + 14));
+  const y = clientY + 16 + th > window.innerHeight - pad
+    ? Math.max(pad, clientY - th - 10)
+    : Math.max(pad, clientY + 14);
+  prEls.tooltip.style.left = `${x}px`;
+  prEls.tooltip.style.top = `${y}px`;
+}
+
+function prRenderChips() {
+  if (!prEls.chips || typeof PianoRoll === "undefined") return;
+  prEls.chips.innerHTML = "";
+  for (const t of PR.tracks) {
+    const color = PianoRoll.trackColor(t.index);
+    const active = PR.selected.has(t.index);
+    const roleTag = ROLE_TAGS[t.role];
+    const chip = el("button", {
+      type: "button",
+      class: "pr-chip" + (active ? " active" : ""),
+      style: `--tc:${color}`,
+      "aria-pressed": String(active),
+      title: "Clique: mostrar/ocultar · Alt+clique ou duplo clique: isolar instrumento",
+      onclick: (e) => {
+        if (e.altKey) PR.selected = new Set([t.index]);
+        else if (PR.selected.has(t.index)) PR.selected.delete(t.index);
+        else PR.selected.add(t.index);
+        if (PR.instance) PR.instance.setSelectedTracks(PR.selected);
+        prRenderChips();
+      },
+      ondblclick: () => {
+        PR.selected = new Set([t.index]);
+        if (PR.instance) PR.instance.setSelectedTracks(PR.selected);
+        prRenderChips();
+      },
+    },
+      el("span", { class: "pr-chip-dot", "aria-hidden": "true" }),
+      el("span", {}, t.name));
+    if (roleTag) chip.append(el("span", { class: "pr-chip-role" }, roleTag));
+    prEls.chips.append(chip);
+  }
+}
+
+function prChannelForTrack(trackIndex, isDrum) {
+  if (isDrum) return 9;
+  const p = sound.player;
+  if (!p || !p.channels) return 0;
+  if (trackIndex != null) {
+    for (const [ch, tr] of p.channels.entries()) {
+      if (tr.index === trackIndex) return ch;
+    }
+  }
+  for (const [ch, tr] of p.channels.entries()) {
+    if (!tr.is_drum && PR.selected.has(tr.index)) return ch;
+  }
+  return 0;
+}
+
+function prAudition(info) {
+  if (!info) return;
+  const pitch = Math.round(Number(info.pitch) || 60);
+  const velocity = Math.max(1, Math.min(127, Math.round(Number(info.velocity) || 96)));
+  const durS = Math.max(0.14, Math.min(2.0, Number(info.duration) || 0.42));
+  const ch = prChannelForTrack(info.trackIndex, Boolean(info.isDrum));
+  if (sound.player && typeof sound.player.auditionNote === "function") {
+    if (sound.player.auditionNote(ch, pitch, velocity, Math.round(durS * 1000))) return;
+  }
+  if (info.isDrum) playDrumBurst(pitch, velocity);
+  else playSinglePitch(pitch, velocity, durS);
+}
+
+function prReset() {
+  prStopSync();
+  if (PR.instance) {
+    PR.instance.destroy();
+    PR.instance = null;
+  }
+  PR.projectId = null;
+  PR.sig = "";
+  PR.tracks = [];
+  PR.duration = 0;
+  PR.selected = new Set();
+  PR.activeNotes = [];
+  PR.pinnedNote = null;
+  if (prEls.chips) prEls.chips.innerHTML = "";
+  if (prEls.tooltip) hide(prEls.tooltip);
+  if (prEls.status) hide(prEls.status);
+  if (prEls.box) hide(prEls.box);
+  prRenderNowBar();
+}
+
+async function prLoadNotes() {
+  const proj = state.project;
+  const midiName = proj && (proj.artifacts || {}).multitrack_midi;
+  const tracks = (proj && proj.multitrack) || [];
+  if (!prEls.box || !midiName || !tracks.length || typeof PianoRoll === "undefined") {
+    prReset();
+    return;
+  }
+  const projectId = proj.job_id;
+  const sig = `${projectId}:${midiName}:${tracks.map((t) => `${t.index}:${t.note_count}:${t.role || ""}`).join(",")}`;
+  if (PR.sig === sig && PR.instance) {
+    show(prEls.box, true);
+    prSyncParts();
+    prSyncHarmony();
+    prSyncSelection();
+    return;
+  }
+  PR.sig = sig;
+  PR.projectId = projectId;
+  hide(prEls.status);
+  show(prEls.box, true);
+  try {
+    const data = await api(projectUrl("/multitrack/notes"));
+    if (!state.project || state.project.job_id !== projectId || PR.sig !== sig) return;
+    PR.tracks = data.tracks || [];
+    PR.duration = Number(data.duration) || proj.duration || 0;
+    PR.selected = prDefaultSelected(PR.tracks);
+    if (!PR.instance) {
+      PR.instance = new PianoRoll(prEls.canvas, {
+        onSeek: (t) => {
+          if (sound.player && sound.player.playing) {
+            sound.player.seek(sound.player.ticksAtSeconds(t));
+            return;
+          }
+          if (projWave && projWave.ws) projWave.ws.setTime(t);
+          else prUpdateTime(t, false);
+          if (sound.player && sound.player.total) {
+            sound.player.seek(sound.player.ticksAtSeconds(t));
+          }
+        },
+        onSelectPart: (part) => {
+          const match = ((state.project && state.project.parts) || []).find((p) => p.part_id === part.part_id) || part;
+          setSelection(partSelection(match));
+        },
+        onAuditionNote: (info) => prAudition(info),
+        onHoverNote: (note, cx, cy) => prRenderTooltip(note, cx, cy),
+        onActiveChange: (active, pinned) => {
+          PR.activeNotes = active || [];
+          PR.pinnedNote = pinned || null;
+          prRenderNowBar();
+        },
+      });
+    }
+    const ti = prTuningInfo();
+    PR.instance.setFollow(prEls.follow ? prEls.follow.checked : true);
+    PR.instance.setHighlightScale(prEls.scale ? prEls.scale.checked : true);
+    PR.instance.setData({
+      duration: PR.duration,
+      tracks: PR.tracks,
+      beats: proj.beats || [],
+      parts: prMappedParts(),
+      harmony: harmonyIsCurrent() ? H.data : null,
+      tuningPitches: ti.pitches,
+      maxFrets: ti.maxFrets,
+    });
+    PR.instance.setSelectedTracks(PR.selected);
+    PR.instance.resize();
+    prRenderChips();
+    prSyncSelection();
+    if (prIsMidiPlaying()) {
+      prUpdateTime(sound.player.currentSeconds(), true);
+      prStartSync();
+    } else if (projWave && projWave.ws) {
+      prUpdateTime(projWave.ws.getCurrentTime(), projWave.ws.isPlaying());
+    } else {
+      prUpdateTime(0, false);
+    }
+    prRenderNowBar();
+  } catch (err) {
+    if (PR.sig === sig) PR.sig = "";
+    banner(prEls.status, `Erro ao carregar notas do Piano Roll: ${err.message}`, "error");
+  }
+}
+
+document.querySelectorAll("[data-pr-pick]").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    if (!PR.instance) return;
+    const mode = btn.dataset.prPick;
+    if (mode === "melodic") {
+      const m = PR.tracks.filter((t) => !t.is_drum && (t.notes || []).length > 0).map((t) => t.index);
+      PR.selected = new Set(m.length ? m : PR.tracks.filter((t) => !t.is_drum).map((t) => t.index));
+    } else if (mode === "guitar") {
+      const isG = (t) => t.is_guitar || t.role === "lead" || t.role === "lead_candidate";
+      const g = PR.tracks.filter((t) => isG(t) && (t.notes || []).length > 0).map((t) => t.index);
+      PR.selected = new Set(g.length ? g : PR.tracks.filter(isG).map((t) => t.index));
+    } else {
+      PR.selected = new Set();
+    }
+    PR.instance.setSelectedTracks(PR.selected);
+    prRenderChips();
+  });
+});
+
+if (prEls.zoomOut) prEls.zoomOut.addEventListener("click", () => PR.instance && PR.instance.zoomBy(1 / 1.35));
+if (prEls.zoomIn) prEls.zoomIn.addEventListener("click", () => PR.instance && PR.instance.zoomBy(1.35));
+if (prEls.fitPart) {
+  prEls.fitPart.addEventListener("click", () => {
+    if (!PR.instance) return;
+    if (sel.cur) PR.instance.fitRange(sel.cur.start, sel.cur.end);
+    else PR.instance.fitAll();
+  });
+}
+if (prEls.fitAll) prEls.fitAll.addEventListener("click", () => PR.instance && PR.instance.fitAll());
+if (prEls.follow) prEls.follow.addEventListener("change", () => PR.instance && PR.instance.setFollow(prEls.follow.checked));
+if (prEls.scale) prEls.scale.addEventListener("change", () => PR.instance && PR.instance.setHighlightScale(prEls.scale.checked));
 
 // ---------- init ----------
 
