@@ -5286,6 +5286,7 @@ const mpEls = {
   stop: $("mpStopBtn"),
   seek: $("mpSeek"),
   time: $("mpTime"),
+  timeTotal: $("mpTimeTotal"),
   status: $("mpStatus"),
   tabFont: $("tabFontSelect"),
   summary: $("mpSoundSummary"),
@@ -5508,10 +5509,13 @@ function fmtTime(sec) {
 function mpRender() {
   const p = sound.player;
   if (!p) return;
-  mpEls.play.innerHTML = p.playing ? "&#10074;&#10074; Pause" : "&#9654; Play";
+  mpEls.play.classList.toggle("is-playing", p.playing);
+  mpEls.play.setAttribute("aria-label", p.playing ? "Pause" : "Play");
   mpEls.seek.disabled = !p.total;
   if (p.total && !sound.dragging) mpEls.seek.value = String(Math.round((p.position / p.total) * 1000));
-  mpEls.time.textContent = p.total ? `${fmtTime(p.seconds(p.position))} / ${fmtTime(p.seconds(p.total))}` : "0:00";
+  mpSeekFill();
+  mpEls.time.textContent = p.total ? fmtTime(p.seconds(p.position)) : "0:00";
+  mpEls.timeTotal.textContent = p.total ? fmtTime(p.seconds(p.total)) : "0:00";
   els.multitrackTracks.querySelectorAll(".ms-btn").forEach((b) => {
     const i = Number(b.dataset.track);
     b.classList.toggle("active", b.dataset.kind === "mute" ? p.muted.has(i) : p.soloed.has(i));
@@ -5524,6 +5528,10 @@ function mpRender() {
       prUpdateTime(p.currentSeconds(), false);
     }
   }
+}
+
+function mpSeekFill() {
+  mpEls.seek.style.setProperty("--fill", `${Number(mpEls.seek.value) / 10}%`);
 }
 
 mpEls.play.addEventListener("click", async () => {
@@ -5548,6 +5556,7 @@ mpEls.stop.addEventListener("click", () => sound.player && sound.player.stop());
 
 mpEls.seek.addEventListener("input", () => {
   sound.dragging = true;
+  mpSeekFill();
 });
 mpEls.seek.addEventListener("change", () => {
   sound.dragging = false;
@@ -5594,7 +5603,6 @@ const prEls = {
   fitAll: $("prFitAllBtn"),
   follow: $("prFollowCheck"),
   scale: $("prScaleCheck"),
-  now: $("prNowBar"),
   wrap: $("prCanvasWrap"),
   canvas: $("pianoRollCanvas"),
   tooltip: $("prTooltip"),
@@ -5609,8 +5617,6 @@ const PR = {
   tracks: [],
   duration: 0,
   selected: new Set(),
-  activeNotes: [],
-  pinnedNote: null,
 };
 
 function prIsMidiPlaying() {
@@ -5684,7 +5690,6 @@ function prSyncSelection() {
   PR.instance.setSelectedPart(sel.cur && sel.cur.partId ? sel.cur.partId : null);
   const ti = prTuningInfo();
   PR.instance.setTuning(ti.pitches, ti.maxFrets);
-  prRenderNowBar();
 }
 
 function prFormatNoteDetails(note) {
@@ -5694,40 +5699,6 @@ function prFormatNoteDetails(note) {
   const positions = note.isDrum ? [] : PianoRoll.guitarPositions(note.pitch, ti.pitches, ti.maxFrets);
   const posLabels = positions.map((p) => `${p.string}ª c.${p.fret}`);
   return { lbl, posLabels };
-}
-
-function prRenderNowBar() {
-  if (!prEls.now) return;
-  prEls.now.innerHTML = "";
-  const list = PR.activeNotes && PR.activeNotes.length
-    ? PR.activeNotes
-    : PR.pinnedNote
-      ? [PR.pinnedNote]
-      : [];
-  if (!list.length || typeof PianoRoll === "undefined") {
-    prEls.now.append(el("span", { class: "muted small" },
-      "Dê play (no áudio acima ou nos instrumentos virtuais) ou clique em qualquer nota para ler os detalhes."));
-    return;
-  }
-  const isPinned = !(PR.activeNotes && PR.activeNotes.length) && !!PR.pinnedNote;
-  const maxShow = 10;
-  list.slice(0, maxShow).forEach((n) => {
-    const color = n.color || PianoRoll.trackColor(n.trackIndex);
-    const { lbl, posLabels } = prFormatNoteDetails(n);
-    const detail = posLabels.length ? `${lbl.pt} · ${posLabels[0]}` : lbl.pt;
-    const pill = el("span", {
-      class: "pr-now-pill" + (isPinned ? " is-pinned" : ""),
-      style: `--tc:${color}`,
-      title: `${n.trackName || ""} · ${lbl.name} (${detail})${posLabels.length > 1 ? ` · Outras: ${posLabels.slice(1).join(", ")}` : ""}`,
-    },
-      el("span", { class: "pr-pill-dot", "aria-hidden": "true" }),
-      el("strong", {}, lbl.name),
-      el("span", { class: "pr-pill-pos" }, `(${detail})`));
-    prEls.now.append(pill);
-  });
-  if (list.length > maxShow) {
-    prEls.now.append(el("span", { class: "muted small" }, `+${list.length - maxShow}`));
-  }
 }
 
 function prRenderTooltip(note, clientX, clientY) {
@@ -5832,13 +5803,10 @@ function prReset() {
   PR.tracks = [];
   PR.duration = 0;
   PR.selected = new Set();
-  PR.activeNotes = [];
-  PR.pinnedNote = null;
   if (prEls.chips) prEls.chips.innerHTML = "";
   if (prEls.tooltip) hide(prEls.tooltip);
   if (prEls.status) hide(prEls.status);
   if (prEls.box) hide(prEls.box);
-  prRenderNowBar();
 }
 
 async function prLoadNotes() {
@@ -5887,11 +5855,6 @@ async function prLoadNotes() {
         },
         onAuditionNote: (info) => prAudition(info),
         onHoverNote: (note, cx, cy) => prRenderTooltip(note, cx, cy),
-        onActiveChange: (active, pinned) => {
-          PR.activeNotes = active || [];
-          PR.pinnedNote = pinned || null;
-          prRenderNowBar();
-        },
       });
     }
     const ti = prTuningInfo();
@@ -5918,7 +5881,6 @@ async function prLoadNotes() {
     } else {
       prUpdateTime(0, false);
     }
-    prRenderNowBar();
   } catch (err) {
     if (PR.sig === sig) PR.sig = "";
     banner(prEls.status, `Erro ao carregar notas do Piano Roll: ${err.message}`, "error");

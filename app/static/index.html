@@ -480,27 +480,11 @@
         <div id="mixerBox" class="hidden">
           <p class="muted top-gap">Instrumentos detectados. M silencia e S deixa só a faixa no player abaixo.</p>
           <div id="multitrackTracks" class="track-list"></div>
-          <div class="midi-player hidden" id="midiPlayer">
-            <div class="midi-player-head">
-              <strong>Ouvir com instrumentos virtuais</strong>
-            </div>
-            <div class="mp-sound-summary">
-              <span class="muted" id="mpSoundSummary"></span>
-              <button type="button" class="btn-outline btn-small" data-open-settings>&#9881; Trocar sons</button>
-            </div>
-            <div class="mp-transport">
-              <button type="button" class="btn-primary" id="mpPlayBtn">&#9654; Play</button>
-              <button type="button" class="btn-outline" id="mpStopBtn">&#9632;</button>
-              <input type="range" id="mpSeek" min="0" max="1000" value="0" step="1" aria-label="Posição" />
-              <span class="mp-time" id="mpTime">0:00 / 0:00</span>
-            </div>
-            <div id="mpStatus" class="status-banner hidden"></div>
-          </div>
           <div class="piano-roll-box hidden" id="pianoRollBox">
             <div class="pr-head">
               <div>
                 <strong>Piano Roll — aprenda lendo as notas</strong>
-                <span class="muted small">Clique nos instrumentos para combinar cores, ou clique numa nota/tecla para ouvi-la isolada.</span>
+                <span class="muted small">Clique nos instrumentos para combinar cores. Passe o mouse sobre uma nota para ver os detalhes, ou clique nela/na tecla para ouvi-la isolada.</span>
               </div>
               <div class="pr-quick-picks" role="group" aria-label="Seleção rápida de instrumentos">
                 <button type="button" class="btn-outline btn-small" data-pr-pick="melodic">Melódicas</button>
@@ -521,14 +505,34 @@
                 <label class="checkbox-row small"><input type="checkbox" id="prScaleCheck" checked /><span>Destacar notas do tom</span></label>
               </div>
             </div>
-            <div class="pr-now-bar" id="prNowBar" aria-live="polite">
-              <span class="muted small">Dê play (no áudio acima ou nos instrumentos virtuais) ou clique em qualquer nota para ler os detalhes.</span>
-            </div>
             <div class="pr-canvas-wrap" id="prCanvasWrap">
               <canvas id="pianoRollCanvas" aria-label="Piano Roll multi-instrumento da música"></canvas>
               <div class="pr-tooltip hidden" id="prTooltip" role="tooltip"></div>
             </div>
             <div id="prStatus" class="status-banner hidden"></div>
+          </div>
+          <div class="midi-player hidden" id="midiPlayer">
+            <div class="midi-player-head">
+              <strong>Ouvir com instrumentos virtuais</strong>
+              <span class="muted" id="mpSoundSummary"></span>
+            </div>
+            <div class="daw-transport mp-transport" role="toolbar" aria-label="Transporte dos instrumentos virtuais">
+              <div class="tp-buttons">
+                <button type="button" class="tp-btn tp-play" id="mpPlayBtn" aria-label="Play" title="Play / Pause dos instrumentos virtuais">
+                  <svg class="ico-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.6v12.8a1 1 0 0 0 1.52.85l10.2-6.4a1 1 0 0 0 0-1.7L9.52 4.75A1 1 0 0 0 8 5.6z"/></svg>
+                  <svg class="ico-pause" viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="5" width="4" height="14" rx="1.2"/><rect x="13.5" y="5" width="4" height="14" rx="1.2"/></svg>
+                </button>
+                <button type="button" class="tp-btn" id="mpStopBtn" aria-label="Parar" title="Parar e voltar ao início">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+                </button>
+              </div>
+              <div class="tp-lcd" title="Posição no MIDI">
+                <div class="lcd-main"><span id="mpTime" class="lcd-time">0:00</span><span class="lcd-total">/ <span id="mpTimeTotal">0:00</span></span></div>
+              </div>
+              <input type="range" id="mpSeek" class="tp-slider mp-seek" min="0" max="1000" value="0" step="1" aria-label="Posição" />
+              <button type="button" class="tp-btn tp-btn-square" data-open-settings aria-label="Trocar sons" title="Trocar os sons (SoundFonts)"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
+            </div>
+            <div id="mpStatus" class="status-banner hidden"></div>
           </div>
         </div>
       </div>

@@ -27,6 +27,8 @@ class MidiPlayer {
     this._anchorTick = 0;
     this._anchorPerf = 0;
     this._auditionTimers = new Map();
+    this._clock = null;          // {sec, ctxTime}: song second at the start of the last rendered block, and when it plays
+    this._pendingSeek = null;    // {tick, at}: ignore blocks rendered before FluidSynth applies a seek
     this.total = 0;
     this.bpm = 120;
     this.onState = () => {};
@@ -42,7 +44,18 @@ class MidiPlayer {
       this.ctx = new AudioContext();
       this.synth = new JSSynth.Synthesizer();
       this.synth.init(this.ctx.sampleRate, { initialGain: 0.5, midiChannelCount: 16 });
-      const node = this.synth.createAudioNode(this.ctx, 8192);
+      // own ScriptProcessor instead of synth.createAudioNode(): each block tells which song tick it
+      // starts at and when it will actually be heard (playbackTime), so the visual clock follows the
+      // audio instead of the synthesis position (which runs a buffer or two ahead of the speakers)
+      const node = this.ctx.createScriptProcessor(8192, 0, 2);
+      node.onaudioprocess = (ev) => {
+        const live = this.playing;   // not while _starting: the player is being rebuilt
+        const tickAt = live ? this.synth.retrievePlayerCurrentTick() : null;
+        const playbackTime = ev.playbackTime;
+        this.synth.render(ev.outputBuffer);
+        if (tickAt) tickAt.then((tick) => this._recordBlock(tick, playbackTime));
+      };
+      this._node = node;
       node.connect(this.ctx.destination);
     }
     if (this.ctx.state === "suspended") await this.ctx.resume();
@@ -83,6 +96,29 @@ class MidiPlayer {
     this.soloed.clear();
     this._setTick(0);
     this.onState();
+  }
+
+  /** Context time of what is coming out of the speakers right now. */
+  _heardCtxTime() {
+    const ctx = this.ctx;
+    if (!ctx) return 0;
+    if (typeof ctx.getOutputTimestamp === "function") {
+      const ts = ctx.getOutputTimestamp();
+      if (ts && ts.contextTime > 0 && ts.performanceTime > 0) {
+        return ts.contextTime + (performance.now() - ts.performanceTime) / 1000;
+      }
+    }
+    return ctx.currentTime - (ctx.outputLatency || ctx.baseLatency || 0);
+  }
+
+  _recordBlock(tick, playbackTime) {
+    if (!this.playing) return;
+    if (this._pendingSeek) {
+      const near = Math.abs(tick - this._pendingSeek.tick) <= this.division * 4;
+      if (!near && performance.now() - this._pendingSeek.at < 1500) return;
+      this._pendingSeek = null;
+    }
+    this._clock = { sec: this.seconds(tick), ctxTime: playbackTime };
   }
 
   _setTick(tick) {
@@ -142,6 +178,8 @@ class MidiPlayer {
     this._starting = true;
     const session = ++this._session;
     const resumeAt = this.position;
+    this._clock = null;
+    this._pendingSeek = resumeAt > 0 ? { tick: resumeAt, at: performance.now() + 3000 } : null;
     try {
       await this._ensureEngine();
       // a fresh player each time: resuming after a pause or the end of the song behaves the same
@@ -180,10 +218,14 @@ class MidiPlayer {
 
   async pause() {
     if (!this.playing) return;
+    // pause where the listener is, not where the synthesis already got (a buffer or two ahead)
+    const heardTick = this._clock ? this.ticksAtSeconds(this.currentSeconds()) : null;
     this.playing = false;
     this._session++;
+    this._clock = null;
+    this._pendingSeek = null;
     this._stopClock();
-    this._setTick(await this.synth.retrievePlayerCurrentTick());
+    this._setTick(heardTick ?? await this.synth.retrievePlayerCurrentTick());
     this.synth.stopPlayer();
     this.onState();
   }
@@ -196,7 +238,11 @@ class MidiPlayer {
 
   seek(ticks) {
     this._setTick(Math.max(0, Math.min(ticks, this.total || ticks)));
-    if (this.playing) this.synth.seekPlayer(this.position);
+    if (this.playing) {
+      this.synth.seekPlayer(this.position);
+      this._pendingSeek = { tick: this.position, at: performance.now() };
+      this._clock = { sec: this.seconds(this.position), ctxTime: this._heardCtxTime() };
+    }
     this.onState();
   }
 
@@ -282,12 +328,16 @@ class MidiPlayer {
     return Math.round((t * this.bpm * this.division) / 60);
   }
 
+  /** Song position (seconds) of what is being heard now; follows the audio output while playing. */
   currentSeconds() {
-    const base = this.seconds(this.playing ? this._anchorTick : this.position);
-    if (!this.playing || typeof performance === "undefined") return base;
-    const dt = Math.max(0, (performance.now() - this._anchorPerf) / 1000);
+    if (!this.playing) return this.seconds(this.position);
     const cap = this.total ? this.seconds(this.total) : Infinity;
-    return Math.min(cap, base + dt);
+    if (this._clock) {
+      const sec = this._clock.sec + (this._heardCtxTime() - this._clock.ctxTime);
+      return Math.max(0, Math.min(cap, sec));
+    }
+    // no block heard yet: nothing is audible, hold at the anchor
+    return Math.min(cap, this.seconds(this._anchorTick));
   }
 
   auditionNote(channel, pitch, velocity = 96, durationMs = 420) {

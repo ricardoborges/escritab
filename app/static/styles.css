@@ -565,13 +565,9 @@ button:disabled {
 .midi-player-head .muted {
   font-size: 0.8rem;
 }
-.mp-transport {
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-}
-.mp-transport input[type="range"] {
-  flex: 1;
+.mp-transport .mp-seek {
+  flex: 1 1 160px;
+  width: auto;
   min-width: 0;
 }
 .mp-time {
@@ -610,10 +606,7 @@ button:disabled {
   color: #111;
 }
 @media (max-width: 640px) {
-  .mp-transport {
-    flex-wrap: wrap;
-  }
-  .mp-transport input[type="range"] {
+  .mp-transport .mp-seek {
     flex-basis: 100%;
     order: 3;
   }
@@ -623,13 +616,6 @@ button:disabled {
 .btn-small {
   padding: 0.3rem 0.7rem;
   font-size: 0.8rem;
-}
-.mp-sound-summary {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.6rem;
-  font-size: 0.85rem;
 }
 .settings-dialog {
   margin: auto;
@@ -1268,43 +1254,12 @@ details.card:not([open]) {
   align-items: center;
   gap: 0.9rem;
 }
-.pr-now-bar {
-  min-height: 2.25rem;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.4rem;
-  padding: 0.4rem 0.65rem;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: rgba(22, 27, 34, 0.78);
-}
-.pr-now-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.38rem;
-  padding: 0.16rem 0.55rem;
-  border-radius: 999px;
-  border: 1px solid color-mix(in srgb, var(--tc, var(--primary)) 55%, var(--border));
-  background: color-mix(in srgb, var(--tc, var(--primary)) 14%, var(--bg-dark));
-  font-size: 0.8rem;
-  line-height: 1.3;
-  white-space: nowrap;
-}
-.pr-now-pill.is-pinned {
-  border-style: dashed;
-  box-shadow: 0 0 0 1px rgba(254, 240, 138, 0.4);
-}
 .pr-pill-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
   background: var(--tc, var(--primary));
   flex: 0 0 auto;
-}
-.pr-pill-pos {
-  color: var(--text-muted);
-  font-size: 0.75rem;
 }
 .pr-canvas-wrap {
   position: relative;
