@@ -24,6 +24,9 @@ class MidiPlayer {
     this._starting = false;
     this._session = 0;
     this.position = 0;           // ticks, kept while paused
+    this._anchorTick = 0;
+    this._anchorPerf = 0;
+    this._auditionTimers = new Map();
     this.total = 0;
     this.bpm = 120;
     this.onState = () => {};
@@ -78,8 +81,14 @@ class MidiPlayer {
     this.channels = new Map(tracks.map((t) => [t.channel, t]));
     this.muted.clear();
     this.soloed.clear();
-    this.position = 0;
+    this._setTick(0);
     this.onState();
+  }
+
+  _setTick(tick) {
+    this.position = tick;
+    this._anchorTick = tick;
+    this._anchorPerf = typeof performance !== "undefined" ? performance.now() : 0;
   }
 
   /** routes: Map channel -> {sf (server id), bank, program}. Fonts must already be loaded. */
@@ -154,6 +163,7 @@ class MidiPlayer {
       await this._poll(() => this.synth.retrievePlayerCurrentTick(), (v) => v >= resumeAt);
       this.synth.setGain(gain);
     }
+    this._setTick(resumeAt);
     this._startClock();
     this.onState();
   }
@@ -173,19 +183,19 @@ class MidiPlayer {
     this.playing = false;
     this._session++;
     this._stopClock();
-    this.position = await this.synth.retrievePlayerCurrentTick();
+    this._setTick(await this.synth.retrievePlayerCurrentTick());
     this.synth.stopPlayer();
     this.onState();
   }
 
   async stop() {
     await this.pause();
-    this.position = 0;
+    this._setTick(0);
     this.onState();
   }
 
   seek(ticks) {
-    this.position = Math.max(0, Math.min(ticks, this.total || ticks));
+    this._setTick(Math.max(0, Math.min(ticks, this.total || ticks)));
     if (this.playing) this.synth.seekPlayer(this.position);
     this.onState();
   }
@@ -257,6 +267,49 @@ class MidiPlayer {
     return (ticks * 60) / (this.bpm * this.division);
   }
 
+  ticksAtSeconds(sec) {
+    const t = Math.max(0, Number(sec) || 0);
+    if (this.tempoMap && this.tempoMap.length) {
+      let lo = 0, hi = this.tempoMap.length - 1;
+      while (lo < hi) {
+        const mid = (lo + hi + 1) >> 1;
+        if (this.tempoMap[mid].sec <= t) lo = mid;
+        else hi = mid - 1;
+      }
+      const s = this.tempoMap[lo];
+      return Math.round(s.tick + ((t - s.sec) * 1e6 * this.division) / s.usPerBeat);
+    }
+    return Math.round((t * this.bpm * this.division) / 60);
+  }
+
+  currentSeconds() {
+    const base = this.seconds(this.playing ? this._anchorTick : this.position);
+    if (!this.playing || typeof performance === "undefined") return base;
+    const dt = Math.max(0, (performance.now() - this._anchorPerf) / 1000);
+    const cap = this.total ? this.seconds(this.total) : Infinity;
+    return Math.min(cap, base + dt);
+  }
+
+  auditionNote(channel, pitch, velocity = 96, durationMs = 420) {
+    if (!this.synth) return false;
+    const ch = Math.max(0, Math.min(15, Number(channel) || 0));
+    if (!this._applyRoute(ch, 0) && ch !== 9) return false;
+    if (this.ctx && this.ctx.state === "suspended") this.ctx.resume();
+    const key = `${ch}:${pitch}`;
+    const prev = this._auditionTimers.get(key);
+    if (prev) {
+      clearTimeout(prev);
+      this.synth.midiNoteOff(ch, pitch);
+    }
+    this.synth.midiNoteOn(ch, pitch, Math.max(1, Math.min(127, Math.round(velocity))));
+    const timer = setTimeout(() => {
+      this._auditionTimers.delete(key);
+      if (this.synth) this.synth.midiNoteOff(ch, pitch);
+    }, Math.max(60, durationMs));
+    this._auditionTimers.set(key, timer);
+    return true;
+  }
+
   _startClock() {
     this._stopClock();
     const session = this._session;
@@ -266,11 +319,11 @@ class MidiPlayer {
       // FluidSynth may keep reporting "playing" a while after the last event: the tick count decides
       if (!this.synth.isPlayerPlaying() || (this.total && tick >= this.total)) {
         this.playing = false;
-        this.position = 0;
+        this._setTick(0);
         this._stopClock();
         this.synth.stopPlayer();
       } else {
-        this.position = tick;
+        this._setTick(tick);
       }
       this.onState();
     }, 250);
